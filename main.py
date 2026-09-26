@@ -2,6 +2,7 @@
 
 import math
 import os
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
 import openpyxl
@@ -22,6 +23,7 @@ TILE_ZOOM = 8
 TILE_SIZE = 256
 MAX_TILE_GRID = 8
 OSM_USER_AGENT = "Shellhacks-2026-3D-map/1.0 (local visualization)"
+TILE_CACHE = {}
 
 SHEET_CATEGORY_FIELD = {
     "DESC Geocoded": "Status",
@@ -121,6 +123,15 @@ def lat_to_tile_y(latitude, zoom):
     return (1.0 - math.asinh(math.tan(radians)) / math.pi) / 2.0 * (2 ** zoom)
 
 
+def tile_x_to_lon(tile_x, zoom):
+    return tile_x / (2 ** zoom) * 360.0 - 180.0
+
+
+def tile_y_to_lat(tile_y, zoom):
+    value = math.pi * (1.0 - 2.0 * tile_y / (2 ** zoom))
+    return math.degrees(math.atan(math.sinh(value)))
+
+
 def choose_tile_zoom(projects):
     """Choose the highest zoom that keeps every project in the tile mosaic."""
     min_lat = min(project["lat"] for project in projects)
@@ -137,49 +148,81 @@ def choose_tile_zoom(projects):
     return 2
 
 
-def download_map_texture(projects):
+def download_map_texture(projects, zoom=None, focus=None):
     """Download nearby OSM tiles and return a texture plus geographic bounds."""
     global TILE_ZOOM
-    TILE_ZOOM = choose_tile_zoom(projects)
-    print(f"Using OpenStreetMap zoom level {TILE_ZOOM} for the full project extent.")
+    TILE_ZOOM = zoom if zoom is not None else choose_tile_zoom(projects)
+    print(f"Using OpenStreetMap zoom level {TILE_ZOOM} for the current view.")
 
     min_lat = min(project["lat"] for project in projects)
     max_lat = max(project["lat"] for project in projects)
     min_lon = min(project["lon"] for project in projects)
     max_lon = max(project["lon"] for project in projects)
 
-    center_lat = (min_lat + max_lat) / 2.0
-    center_lon = (min_lon + max_lon) / 2.0
+    if focus is None:
+        center_lat = (min_lat + max_lat) / 2.0
+        center_lon = (min_lon + max_lon) / 2.0
+    else:
+        center_lat, center_lon = focus
     center_x = lon_to_tile_x(center_lon, TILE_ZOOM)
     center_y = lat_to_tile_y(center_lat, TILE_ZOOM)
     tile_count = 2 ** TILE_ZOOM
 
-    min_x = max(0, math.floor(lon_to_tile_x(min_lon, TILE_ZOOM)) - 1)
-    max_x = min(tile_count - 1, math.floor(lon_to_tile_x(max_lon, TILE_ZOOM)) + 1)
-    min_y = max(0, math.floor(lat_to_tile_y(max_lat, TILE_ZOOM)) - 1)
-    max_y = min(tile_count - 1, math.floor(lat_to_tile_y(min_lat, TILE_ZOOM)) + 1)
+    if zoom is None or TILE_ZOOM <= choose_tile_zoom(projects):
+        min_x = max(0, math.floor(lon_to_tile_x(min_lon, TILE_ZOOM)) - 1)
+        max_x = min(tile_count - 1, math.floor(lon_to_tile_x(max_lon, TILE_ZOOM)) + 1)
+        min_y = max(0, math.floor(lat_to_tile_y(max_lat, TILE_ZOOM)) - 1)
+        max_y = min(tile_count - 1, math.floor(lat_to_tile_y(min_lat, TILE_ZOOM)) + 1)
+    else:
+        tile_span = 6
+        focus_tile_x = math.floor(center_x)
+        focus_tile_y = math.floor(center_y)
+        min_x = max(0, focus_tile_x - tile_span // 2)
+        max_x = min(tile_count - 1, min_x + tile_span - 1)
+        min_y = max(0, focus_tile_y - tile_span // 2)
+        max_y = min(tile_count - 1, min_y + tile_span - 1)
+
+    center_x = (min_x + max_x + 1) / 2.0
+    center_y = (min_y + max_y + 1) / 2.0
 
     texture_image = Image.new(
         "RGB",
         ((max_x - min_x + 1) * TILE_SIZE, (max_y - min_y + 1) * TILE_SIZE),
         (45, 52, 58),
     )
-    session = requests.Session()
-    session.headers.update({"User-Agent": OSM_USER_AGENT})
+    def fetch_tile(tile_coordinates):
+        tile_x, tile_y = tile_coordinates
+        cache_key = (TILE_ZOOM, tile_x, tile_y)
+        if cache_key in TILE_CACHE:
+            return tile_coordinates, TILE_CACHE[cache_key]
 
-    for tile_x in range(min_x, max_x + 1):
-        for tile_y in range(min_y, max_y + 1):
-            url = f"https://tile.openstreetmap.org/{TILE_ZOOM}/{tile_x}/{tile_y}.png"
-            try:
-                response = session.get(url, timeout=15)
-                response.raise_for_status()
-                tile = Image.open(BytesIO(response.content)).convert("RGB")
+        url = f"https://tile.openstreetmap.org/{TILE_ZOOM}/{tile_x}/{tile_y}.png"
+        try:
+            response = requests.get(
+                url,
+                headers={"User-Agent": OSM_USER_AGENT},
+                timeout=15,
+            )
+            response.raise_for_status()
+            tile = Image.open(BytesIO(response.content)).convert("RGB")
+            TILE_CACHE[cache_key] = tile
+            return tile_coordinates, tile
+        except requests.RequestException as error:
+            print(f"Could not download map tile: {error}")
+            return tile_coordinates, None
+
+    tile_coordinates = [
+        (tile_x, tile_y)
+        for tile_x in range(min_x, max_x + 1)
+        for tile_y in range(min_y, max_y + 1)
+    ]
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        for (tile_x, tile_y), tile in executor.map(fetch_tile, tile_coordinates):
+            if tile is not None:
                 texture_image.paste(
                     tile,
                     ((tile_x - min_x) * TILE_SIZE, (tile_y - min_y) * TILE_SIZE),
                 )
-            except requests.RequestException as error:
-                print(f"Could not download map tile: {error}")
 
     return texture_image, min_x, min_y, center_x, center_y
 
@@ -204,6 +247,7 @@ def make_texture(image):
 
 
 def setup_opengl(width, height):
+    glClearColor(0.035, 0.05, 0.07, 1.0)
     glViewport(0, 0, width, height)
     glMatrixMode(GL_PROJECTION)
     glLoadIdentity()
@@ -335,7 +379,11 @@ def main():
     print(f"Found {len(overlaps)} geographic project overlaps.")
     print(f"Overlap checker: {len(overlaps)} relationships processed; line rendering enabled.")
     print("Downloading OpenStreetMap floor tiles...")
-    map_image, min_x, min_y, center_x, center_y = download_map_texture(projects)
+    map_zoom = choose_tile_zoom(projects)
+    map_image, min_x, min_y, center_x, center_y = download_map_texture(
+        projects,
+        zoom=map_zoom,
+    )
 
     pygame.init()
     pygame.display.set_mode(WINDOW_SIZE, DOUBLEBUF | OPENGL)
@@ -345,7 +393,7 @@ def main():
     quadric = gluNewQuadric()
     info_panel = ProjectInfoPanel(WINDOW_SIZE)
 
-    camera_distance = max(map_image.width, map_image.height) / TILE_SIZE * 26.0
+    camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
     camera_rotation_x = 52.0
     camera_rotation_y = 0.0
     camera_offset_x = 0.0
@@ -368,9 +416,49 @@ def main():
                     mouse_down_position = event.pos
                     last_mouse_pos = event.pos
                 elif event.button == 4:
-                    camera_distance = max(8.0, camera_distance - 4.0)
+                    new_zoom = min(8, map_zoom + 1)
+                    if new_zoom != map_zoom:
+                        focus_lon = tile_x_to_lon(
+                            center_x + camera_offset_x / 40.0,
+                            map_zoom,
+                        )
+                        focus_lat = tile_y_to_lat(
+                            center_y + camera_offset_z / 40.0,
+                            map_zoom,
+                        )
+                        map_zoom = new_zoom
+                        glDeleteTextures([texture_id])
+                        map_image, min_x, min_y, center_x, center_y = download_map_texture(
+                            projects,
+                            zoom=map_zoom,
+                            focus=(focus_lat, focus_lon),
+                        )
+                        texture_id = make_texture(map_image)
+                        camera_offset_x = 0.0
+                        camera_offset_z = 0.0
+                        camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
                 elif event.button == 5:
-                    camera_distance = min(300.0, camera_distance + 4.0)
+                    new_zoom = max(2, map_zoom - 1)
+                    if new_zoom != map_zoom:
+                        focus_lon = tile_x_to_lon(
+                            center_x + camera_offset_x / 40.0,
+                            map_zoom,
+                        )
+                        focus_lat = tile_y_to_lat(
+                            center_y + camera_offset_z / 40.0,
+                            map_zoom,
+                        )
+                        map_zoom = new_zoom
+                        glDeleteTextures([texture_id])
+                        map_image, min_x, min_y, center_x, center_y = download_map_texture(
+                            projects,
+                            zoom=map_zoom,
+                            focus=(focus_lat, focus_lon),
+                        )
+                        texture_id = make_texture(map_image)
+                        camera_offset_x = 0.0
+                        camera_offset_z = 0.0
+                        camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 mouse_down = False
                 if math.dist(event.pos, mouse_down_position) <= 6.0:

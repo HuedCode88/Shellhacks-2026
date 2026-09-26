@@ -58,7 +58,7 @@ class ProjectInfoPanel:
                 (18, 56),
             )
             self.surface.blit(
-                self.body_font.render("WASD move | Shift: faster | Drag: orbit | Wheel: zoom", True, (205, 220, 232)),
+                self.body_font.render("WASD move | Shift: faster | Drag: orbit | Wheel: detail zoom", True, (205, 220, 232)),
                 (18, 84),
             )
             self.surface.blit(
