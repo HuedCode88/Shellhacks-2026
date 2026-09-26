@@ -1,27 +1,22 @@
-"""
-Maps every geocoded project in the workbook onto a real,
-interactive OpenStreetMap-based map (via Folium/Leaflet) and saves
-it as a standalone HTML file you can open in any browser.
-
-Unlike the in-chat map tool, this has no marker limit, combines
-both utilities on one map, and can be re-run any time the workbook
-is updated -- just run:
-
-    pip install openpyxl folium
-    python map_projects.py
-
-It looks for the workbook in the same folder as this script by
-default; change EXCEL_FILE below if yours lives elsewhere.
-"""
-
 import os
+
 import openpyxl
 import folium
-from folium.plugins import MarkerCluster
+
+from build_overlap_table import (
+    load_desc_projects,
+    load_gpc_projects,
+    build_overlap_table,
+)
+
+
+# ============================================================
+# FILES
+# ============================================================
 
 EXCEL_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "gridlock_project_tables_geocoded_nominatim (1).xlsx"
+    "gridlock_project_tables_geocoded_nominatim(1).xlsx"
 )
 
 OUTPUT_HTML = os.path.join(
@@ -29,14 +24,16 @@ OUTPUT_HTML = os.path.join(
     "project_map.html"
 )
 
-# Which column identifies a project's category on each sheet, and
-# what color to draw that category's markers in. Folium's built-in
-# Icon colors are a fixed palette (not arbitrary hex), so we map
-# categories onto the closest ones.
+
+# ============================================================
+# PROJECT MARKER SETTINGS
+# ============================================================
+
 SHEET_CATEGORY_FIELD = {
     "DESC Geocoded": "Status",
     "GA ITS Geocoded": "Sponsor (GPC/GTC/MEAG/DU/SAV)",
 }
+
 
 CATEGORY_COLORS = {
     ("DESC Geocoded", "In Progress"): "green",
@@ -49,21 +46,62 @@ CATEGORY_COLORS = {
     ("GA ITS Geocoded", "DU"): "darkred",
 }
 
+
 DEFAULT_COLOR = "gray"
 
-ID_FIELD_CANDIDATES = ["Project ID", "TEAMS Number"]
+
+ID_FIELD_CANDIDATES = [
+    "Project ID",
+    "TEAMS Number",
+]
+
+
 NAME_FIELD = "Project Name / Endpoints (raw title)"
 
-# Extra fields to show in each marker's popup, per sheet, in order.
-# Only fields that exist and have a value are shown.
+
 POPUP_FIELDS = {
-    "DESC Geocoded": ["Status", "Planned In-Service Date", "Description", "confidence"],
-    "GA ITS Geocoded": ["Sponsor (GPC/GTC/MEAG/DU/SAV)", "Need / In-Service Date", "Zone", "confidence"],
+
+    "DESC Geocoded": [
+        "Status",
+        "Planned In-Service Date",
+        "Description",
+        "confidence",
+    ],
+
+    "GA ITS Geocoded": [
+        "Sponsor (GPC/GTC/MEAG/DU/SAV)",
+        "Need / In-Service Date",
+        "Zone",
+        "confidence",
+    ],
 }
 
 
+# ============================================================
+# OVERLAP COLORS
+# ============================================================
+
+OVERLAP_COLORS = {
+
+    "Touching / Crossing -- must coordinate (outage timing, crossing structures)":
+        "red",
+
+    "Under 1.6 km -- can share the right-of-way (access roads, permits)":
+        "orange",
+
+    "Under 8 km -- can share site logistics (laydown yards, deliveries)":
+        "purple",
+
+    "Under 40 km -- can share crews & equipment":
+        "blue",
+}
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+
 def safe_float(value):
-    """Coerces a coordinate cell to a float, tolerating stray commas/whitespace."""
 
     if value is None:
         return None
@@ -77,14 +115,21 @@ def safe_float(value):
 
         try:
             return float(text)
+
         except ValueError:
             pass
 
-        parts = [p.strip() for p in text.split(",") if p.strip()]
+        parts = [
+            p.strip()
+            for p in text.split(",")
+            if p.strip()
+        ]
 
         for part in reversed(parts):
+
             try:
                 return float(part)
+
             except ValueError:
                 continue
 
@@ -92,17 +137,23 @@ def safe_float(value):
 
 
 def _row_dict(header, row):
-    return {header[i]: row[i] for i in range(len(header))}
 
+    return {
+        header[i]: row[i]
+        for i in range(len(header))
+    }
+
+
+# ============================================================
+# LOAD PROJECTS FOR MAP
+# ============================================================
 
 def load_projects(path):
-    """
-    Reads every sheet in the workbook and returns one dict per row
-    that has a valid center_lat/center_lon -- rows the geocoder
-    marked UNMATCHED are skipped since there's nowhere to plot them.
-    """
 
-    wb = openpyxl.load_workbook(path, data_only=True)
+    wb = openpyxl.load_workbook(
+        path,
+        data_only=True
+    )
 
     projects = []
 
@@ -110,126 +161,602 @@ def load_projects(path):
 
         ws = wb[sheet_name]
 
-        rows = list(ws.iter_rows(values_only=True))
+        rows = list(
+            ws.iter_rows(
+                values_only=True
+            )
+        )
 
         if not rows:
             continue
 
         header = rows[0]
 
-        category_field = SHEET_CATEGORY_FIELD.get(sheet_name)
-        popup_fields = POPUP_FIELDS.get(sheet_name, [])
+        category_field = (
+            SHEET_CATEGORY_FIELD.get(
+                sheet_name
+            )
+        )
+
+        popup_fields = (
+            POPUP_FIELDS.get(
+                sheet_name,
+                []
+            )
+        )
 
         for row in rows[1:]:
 
-            record = _row_dict(header, row)
+            record = _row_dict(
+                header,
+                row
+            )
 
-            raw_lat = record.get("center_lat")
-            raw_lon = record.get("center_lon")
+            lat = safe_float(
+                record.get("center_lat")
+            )
 
-            lat = safe_float(raw_lat)
-            lon = safe_float(raw_lon)
+            lon = safe_float(
+                record.get("center_lon")
+            )
 
             if lat is None or lon is None:
-
-                if raw_lat is not None or raw_lon is not None:
-                    print(
-                        f"Skipping row with unparseable coordinates "
-                        f"in '{sheet_name}': lat={raw_lat!r} lon={raw_lon!r}"
-                    )
-
                 continue
+
+            # ------------------------------------------------
+            # Project ID
+            # ------------------------------------------------
 
             project_id = None
 
             for field in ID_FIELD_CANDIDATES:
 
-                if field in record and record[field] is not None:
+                if (
+                    field in record
+                    and record[field] is not None
+                ):
+
                     project_id = record[field]
+
                     break
 
-            category = record.get(category_field) if category_field else None
+            # ------------------------------------------------
+            # Category
+            # ------------------------------------------------
+
+            category = None
+
+            if category_field:
+
+                category = record.get(
+                    category_field
+                )
+
+            # ------------------------------------------------
+            # Popup
+            # ------------------------------------------------
 
             popup_lines = []
 
             for field in popup_fields:
 
-                value = record.get(field)
+                value = record.get(
+                    field
+                )
 
-                if value is not None and str(value).strip():
-                    popup_lines.append(f"<b>{field}:</b> {value}")
+                if (
+                    value is not None
+                    and str(value).strip()
+                ):
+
+                    popup_lines.append(
+                        f"<b>{field}:</b> {value}"
+                    )
+
+            # ------------------------------------------------
+            # Store project
+            # ------------------------------------------------
 
             projects.append({
+
                 "sheet": sheet_name,
+
                 "id": project_id,
-                "name": record.get(NAME_FIELD),
+
+                "name": record.get(
+                    NAME_FIELD
+                ),
+
                 "category": category,
+
                 "lat": lat,
+
                 "lon": lon,
+
                 "popup_lines": popup_lines,
-                "color": CATEGORY_COLORS.get((sheet_name, category), DEFAULT_COLOR),
+
+                "color": CATEGORY_COLORS.get(
+                    (
+                        sheet_name,
+                        category
+                    ),
+                    DEFAULT_COLOR
+                ),
+
             })
 
     return projects
 
 
-def build_map(projects, output_path):
+# ============================================================
+# BUILD LOOKUP FOR PROJECTS
+# ============================================================
+
+def build_project_lookup(projects):
+
+    lookup = {}
+
+    for project in projects:
+
+        project_id = project["id"]
+
+        if project_id is None:
+            continue
+
+        key = (
+            project["sheet"],
+            str(project_id).strip()
+        )
+
+        lookup[key] = project
+
+    return lookup
+
+
+# ============================================================
+# ADD OVERLAP LINES
+# ============================================================
+
+def add_overlap_lines(
+    fmap,
+    overlaps,
+    project_lookup
+):
+
+    overlap_layer = folium.FeatureGroup(
+        name="Project Overlaps",
+        show=True
+    )
+
+    overlap_count = 0
+
+    for overlap in overlaps:
+
+        # ----------------------------------------------------
+        # Find DESC project
+        # ----------------------------------------------------
+
+        desc_key = (
+            "DESC Geocoded",
+            str(
+                overlap["desc_id"]
+            ).strip()
+        )
+
+        desc_project = project_lookup.get(
+            desc_key
+        )
+
+        # ----------------------------------------------------
+        # Find GPC project
+        # ----------------------------------------------------
+
+        gpc_key = (
+            "GA ITS Geocoded",
+            str(
+                overlap["gpc_id"]
+            ).strip()
+        )
+
+        gpc_project = project_lookup.get(
+            gpc_key
+        )
+
+        # If either project can't be found on
+        # the map, don't draw the line.
+        if (
+            desc_project is None
+            or gpc_project is None
+        ):
+            print(
+                "Could not map overlap:",
+                overlap["desc_id"],
+                overlap["gpc_id"]
+            )
+
+            continue
+
+        # ----------------------------------------------------
+        # Coordinates
+        # ----------------------------------------------------
+
+        start = [
+            desc_project["lat"],
+            desc_project["lon"]
+        ]
+
+        end = [
+            gpc_project["lat"],
+            gpc_project["lon"]
+        ]
+
+        # ----------------------------------------------------
+        # Color
+        # ----------------------------------------------------
+
+        color = OVERLAP_COLORS.get(
+            overlap["geographic_tier"],
+            "red"
+        )
+
+        # ----------------------------------------------------
+        # Timeline
+        # ----------------------------------------------------
+
+        timeline = overlap[
+            "timeline_overlap"
+        ]
+
+        if timeline is None:
+
+            timeline_text = "Unknown"
+
+        elif timeline:
+
+            timeline_text = "Yes"
+
+        else:
+
+            timeline_text = "No"
+
+        # ----------------------------------------------------
+        # Popup
+        # ----------------------------------------------------
+
+        desc_name = (
+            desc_project["name"]
+            or overlap["desc_id"]
+        )
+
+        gpc_name = (
+            gpc_project["name"]
+            or overlap["gpc_id"]
+        )
+
+        popup_html = f"""
+        <div style="font-family: Arial;">
+
+            <h4 style="margin-bottom: 8px;">
+                Project Overlap
+            </h4>
+
+            <b>DESC:</b><br>
+            {desc_name}<br>
+            ID: {overlap["desc_id"]}
+
+            <br><br>
+
+            <b>GPC:</b><br>
+            {gpc_name}<br>
+            ID: {overlap["gpc_id"]}
+
+            <br><br>
+
+            <b>Distance:</b>
+            {overlap["distance_km"]} km
+            ({overlap["distance_mi"]} mi)
+
+            <br><br>
+
+            <b>Geographic tier:</b><br>
+            {overlap["geographic_tier"]}
+
+            <br><br>
+
+            <b>Timeline overlap:</b>
+            {timeline_text}
+
+            <br>
+
+            <b>In-service date gap:</b>
+            {overlap["day_gap"] if overlap["day_gap"] is not None else "Unknown"}
+            days
+
+        </div>
+        """
+
+        # ----------------------------------------------------
+        # Draw line
+        # ----------------------------------------------------
+
+        folium.PolyLine(
+
+            locations=[
+                start,
+                end
+            ],
+
+            color=color,
+
+            weight=5,
+
+            opacity=0.8,
+
+            tooltip=(
+                f"{desc_name} ↔ "
+                f"{gpc_name} | "
+                f"{overlap['distance_mi']} mi"
+            ),
+
+            popup=folium.Popup(
+                popup_html,
+                max_width=400
+            ),
+
+        ).add_to(
+            overlap_layer
+        )
+
+        overlap_count += 1
+
+    overlap_layer.add_to(
+        fmap
+    )
+
+    print(
+        f"Added {overlap_count} overlap lines to map."
+    )
+
+
+# ============================================================
+# BUILD MAP
+# ============================================================
+
+def build_map(
+    projects,
+    overlaps,
+    output_path
+):
 
     if not projects:
-        raise ValueError("No geocoded projects found -- nothing to map.")
 
-    center_lat = sum(p["lat"] for p in projects) / len(projects)
-    center_lon = sum(p["lon"] for p in projects) / len(projects)
+        raise ValueError(
+            "No geocoded projects found."
+        )
+
+    # --------------------------------------------------------
+    # Center map
+    # --------------------------------------------------------
+
+    center_lat = (
+        sum(
+            p["lat"]
+            for p in projects
+        )
+        / len(projects)
+    )
+
+    center_lon = (
+        sum(
+            p["lon"]
+            for p in projects
+        )
+        / len(projects)
+    )
 
     fmap = folium.Map(
-        location=[center_lat, center_lon],
+
+        location=[
+            center_lat,
+            center_lon
+        ],
+
         zoom_start=7,
+
         tiles="OpenStreetMap",
     )
 
-    # One toggleable layer per sheet, so you can hide/show DESC vs
-    # GA ITS independently from the layer control in the corner.
+    # --------------------------------------------------------
+    # Project layers
+    # --------------------------------------------------------
+
     layers = {}
 
-    for p in projects:
+    for project in projects:
 
-        sheet = p["sheet"]
+        sheet = project["sheet"]
 
         if sheet not in layers:
-            layers[sheet] = folium.FeatureGroup(name=sheet)
-            layers[sheet].add_to(fmap)
 
-        title_bits = [str(p["name"])]
+            layers[sheet] = (
+                folium.FeatureGroup(
+                    name=sheet
+                )
+            )
 
-        if p["id"] is not None:
-            title_bits.append(f"[{p['id']}]")
+            layers[sheet].add_to(
+                fmap
+            )
 
-        popup_html = f"<b>{' '.join(title_bits)}</b><br>"
-        popup_html += "<br>".join(p["popup_lines"])
+        title_bits = [
+            str(
+                project["name"]
+            )
+        ]
+
+        if project["id"] is not None:
+
+            title_bits.append(
+                f"[{project['id']}]"
+            )
+
+        popup_html = (
+            f"<b>{' '.join(title_bits)}</b>"
+            "<br>"
+        )
+
+        popup_html += (
+            "<br>".join(
+                project["popup_lines"]
+            )
+        )
 
         folium.Marker(
-            location=[p["lat"], p["lon"]],
-            tooltip=" ".join(title_bits),
-            popup=folium.Popup(popup_html, max_width=350),
-            icon=folium.Icon(color=p["color"]),
-        ).add_to(layers[sheet])
 
-    folium.LayerControl(collapsed=False).add_to(fmap)
+            location=[
+                project["lat"],
+                project["lon"]
+            ],
 
-    fmap.save(output_path)
+            tooltip=" ".join(
+                title_bits
+            ),
 
+            popup=folium.Popup(
+                popup_html,
+                max_width=350
+            ),
+
+            icon=folium.Icon(
+                color=project["color"]
+            ),
+
+        ).add_to(
+            layers[sheet]
+        )
+
+    # --------------------------------------------------------
+    # OVERLAPS
+    # --------------------------------------------------------
+
+    project_lookup = (
+        build_project_lookup(
+            projects
+        )
+    )
+
+    add_overlap_lines(
+        fmap,
+        overlaps,
+        project_lookup
+    )
+
+    # --------------------------------------------------------
+    # Layer controls
+    # --------------------------------------------------------
+
+    folium.LayerControl(
+        collapsed=False
+    ).add_to(
+        fmap
+    )
+
+    # --------------------------------------------------------
+    # Save
+    # --------------------------------------------------------
+
+    fmap.save(
+        output_path
+    )
+
+
+# ============================================================
+# MAIN
+# ============================================================
 
 def main():
 
-    projects = load_projects(EXCEL_FILE)
+    print(
+        "Loading project map data..."
+    )
 
-    print(f"Loaded {len(projects)} geocoded projects.")
+    projects = load_projects(
+        EXCEL_FILE
+    )
 
-    build_map(projects, OUTPUT_HTML)
+    print(
+        f"Loaded {len(projects)} "
+        f"geocoded projects."
+    )
 
-    print(f"Map saved to: {OUTPUT_HTML}")
-    print("Open that file in a browser to view it.")
+    # --------------------------------------------------------
+    # Load the same projects used by
+    # build_overlap_table.py
+    # --------------------------------------------------------
 
+    print(
+        "Calculating project overlaps..."
+    )
+
+    wb = openpyxl.load_workbook(
+        EXCEL_FILE,
+        data_only=True
+    )
+
+    desc_projects = (
+        load_desc_projects(wb)
+    )
+
+    gpc_projects = (
+        load_gpc_projects(wb)
+    )
+
+    print(
+        f"DESC projects: "
+        f"{len(desc_projects)}"
+    )
+
+    print(
+        f"GPC projects: "
+        f"{len(gpc_projects)}"
+    )
+
+    # --------------------------------------------------------
+    # Calculate overlaps
+    # --------------------------------------------------------
+
+    overlaps = build_overlap_table(
+        desc_projects,
+        gpc_projects
+    )
+
+    print(
+        f"Found {len(overlaps)} "
+        f"overlapping project pairs."
+    )
+
+    # --------------------------------------------------------
+    # Build map
+    # --------------------------------------------------------
+
+    build_map(
+        projects,
+        overlaps,
+        OUTPUT_HTML
+    )
+
+    print()
+    print(
+        f"Map saved to:"
+    )
+    print(
+        OUTPUT_HTML
+    )
+
+
+# ============================================================
+# START
+# ============================================================
 
 if __name__ == "__main__":
     main()
