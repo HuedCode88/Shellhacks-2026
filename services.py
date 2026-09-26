@@ -14,6 +14,7 @@ from xml.etree import ElementTree
 import folium
 import openpyxl
 from pypdf import PdfReader, PdfWriter
+from branca.element import Element
 
 from config import (
     ALLOWED_EXTENSIONS, GEMINI_MODEL, MAX_ARCHIVE_UNCOMPRESSED_BYTES,
@@ -365,9 +366,440 @@ def add_project_search(fmap, projects):
     projects_json = json.dumps(search_projects)
 
     search_html = f"""
-    """
-    fmap.get_root().html.add_child(Element(search_html))
+        <style>
+    
+            #project-search-container {{
+                position: fixed;
+    
+                top: 20px;
+                left: 50%;
+    
+                transform: translateX(-50%);
+    
+                z-index: 9999;
+    
+                font-family: Arial, sans-serif;
+    
+                width: 330px;
+            }}
+    
+    
+            #project-search-box {{
+                display: flex;
+    
+                background: white;
+    
+                border-radius: 7px;
+    
+                box-shadow:
+                    0 3px 12px
+                    rgba(0,0,0,0.3);
+    
+                overflow: hidden;
+            }}
+    
+    
+            #project-search-input {{
+                flex: 1;    
+                border: none;    
+                padding: 11px 12px;    
+                font-size: 14px;
+                outline: none;
+                min-width: 0;
+            }}
+            #project-search-button {{
+                border: none;
+                background: #222;
+                color: white;
+                padding: 0 14px;
+                cursor: pointer;
+                font-size: 16px;
+            }}
+            #project-search-button:hover {{
+                background: #444;
+            }}    
+            #project-search-results {{
+                display: none;    
+                margin-top: 6px;    
+                background: white;    
+                border-radius: 7px;    
+                box-shadow:
+                    0 3px 12px
+                    rgba(0,0,0,0.3);    
+                max-height: 400px;    
+                overflow-y: auto;
+            }}
+    
+    
+            .project-search-result {{
+                padding: 10px 12px;    
+                border-bottom:
+                    1px solid #ddd;    
+                cursor: pointer;    
+                font-size: 13px;
+            }}    
+            .project-search-result:hover {{
+                background: #f0f0f0;
+            }}
+    
+    
+            .project-search-id {{
+                font-weight: bold;    
+                font-size: 14px;    
+                margin-bottom: 3px;
+            }}
+    
+    
+            .project-search-name {{
+                color: #444;    
+                line-height: 1.3;
+            }}
+    
+    
+            .project-search-meta {{
+                color: #777;    
+                font-size: 11px;    
+                margin-top: 4px;
+            }}
+    
+    
+            .project-search-no-results {{
+                padding: 12px;
+    
+                color: #666;
+    
+                font-size: 13px;
+            }}
+    
+        </style>
+    
+    
+        <div id="project-search-container">
+    
+            <div id="project-search-box">
+    
+                <input
+                    id="project-search-input"
+                    type="text"
+                    placeholder="Search projects..."
+                    autocomplete="off"
+                >
+    
+                <button
+                    id="project-search-button"
+                    onclick="searchProjects()"
+                    title="Search"
+                >
+                    🔍
+                </button>
+    
+            </div>
+    
+    
+            <div id="project-search-results"></div>
+    
+        </div>
+    
+    
+        <script>
+    
+            var projectSearchData =
+                {projects_json};
+    
+    
+            function searchProjects() {{
+    
+                var input =
+                    document.getElementById(
+                        "project-search-input"
+                    );
+    
+                var results =
+                    document.getElementById(
+                        "project-search-results"
+                    );
+    
+    
+                var query =
+                    input.value
+                        .trim()
+                        .toLowerCase();
+    
+    
+                if (!query) {{
+    
+                    results.style.display = "none";
+    
+                    results.innerHTML = "";
+    
+                    return;
+    
+                }}
+    
+    
+                /*
+                 * Search ID, name, utility,
+                 * and category.
+                 */
+    
+                var matches =
+                    projectSearchData.filter(
+                        function(project) {{
+    
+                            var searchable =
+                                (
+                                    project.id +
+                                    " " +
+                                    project.name +
+                                    " " +
+                                    project.sheet +
+                                    " " +
+                                    project.category
+                                ).toLowerCase();
+    
+                            return searchable.includes(
+                                query
+                            );
+    
+                        }}
+                    );
+    
+    
+                /*
+                 * Limit displayed results.
+                 */
+    
+                matches =
+                    matches.slice(0, 15);
+    
+    
+                if (matches.length === 0) {{
+    
+                    results.innerHTML =
+                        '<div class="project-search-no-results">' +
+                        'No matching projects found.' +
+                        '</div>';
+    
+                    results.style.display =
+                        "block";
+    
+                    return;
+    
+                }}
+    
+    
+                /*
+                 * Build result list.
+                 */
+    
+                var html = "";
+    
+    
+                matches.forEach(
+                    function(project) {{
+    
+                        var safeId =
+                            escapeSearchHtml(
+                                project.id
+                            );
+    
+                        var safeName =
+                            escapeSearchHtml(
+                                project.name
+                            );
+    
+                        var safeSheet =
+                            escapeSearchHtml(
+                                project.sheet
+                            );
+    
+                        var safeCategory =
+                            escapeSearchHtml(
+                                project.category
+                            );
+    
+    
+                        html +=
+                            '<div ' +
+                            'class="project-search-result" ' +
+                            'onclick="focusProject(' +
+                            project.lat + ',' +
+                            project.lon +
+                            ')">' +
+    
+                                '<div class="project-search-id">' +
+                                    safeId +
+                                '</div>' +
+    
+                                '<div class="project-search-name">' +
+                                    safeName +
+                                '</div>' +
+    
+                                '<div class="project-search-meta">' +
+                                    safeSheet +
+                                    (
+                                        safeCategory
+                                        ? " • " + safeCategory
+                                        : ""
+                                    ) +
+                                '</div>' +
+    
+                            '</div>';
+    
+                    }}
+                );
+    
+    
+                results.innerHTML =
+                    html;
+    
+                results.style.display =
+                    "block";
+    
+            }}
+    
+    
+            function focusProject(
+                lat,
+                lon
+            ) {{
+    
+                /*
+                 * Find Folium's Leaflet map.
+                 */
+    
+                var mapObject = null;
+    
+    
+                for (
+                    var key in window
+                ) {{
+    
+                    if (
+                        key.startsWith("map_") &&
+                        window[key] &&
+                        typeof window[key].setView
+                            === "function"
+                    ) {{
+    
+                        mapObject =
+                            window[key];
+    
+                        break;
+    
+                    }}
+    
+                }}
+    
+    
+                if (!mapObject) {{
+    
+                    console.error(
+                        "Could not find Leaflet map."
+                    );
+    
+                    return;
+    
+                }}
+    
+    
+                /*
+                 * Zoom to project.
+                 */
+    
+                mapObject.setView(
+                    [lat, lon],
+                    13
+                );
+    
+    
+                /*
+                 * Close results.
+                 */
+    
+                document.getElementById(
+                    "project-search-results"
+                ).style.display =
+                    "none";
+    
+    
+                /*
+                 * Clear search box.
+                 */
+    
+                document.getElementById(
+                    "project-search-input"
+                ).value = "";
+    
+            }}
+    
+    
+            function escapeSearchHtml(
+                value
+            ) {{
+    
+                return String(value)
+                    .replace(/&/g, "&amp;")
+                    .replace(/</g, "&lt;")
+                    .replace(/>/g, "&gt;")
+                    .replace(/"/g, "&quot;")
+                    .replace(/'/g, "&#039;");
+    
+            }}
+    
+    
+            /*
+             * Pressing Enter searches.
+             */
+    
+            document
+                .getElementById(
+                    "project-search-input"
+                )
+                .addEventListener(
+                    "keydown",
+                    function(event) {{
+    
+                        if (
+                            event.key === "Enter"
+                        ) {{
+    
+                            searchProjects();
+    
+                        }}
+    
+                    }}
+                );
+    
+    
+            /*
+             * Search while typing.
+             *
+             * This makes it feel more like
+             * an autocomplete box.
+             */
+    
+            document
+                .getElementById(
+                    "project-search-input"
+                )
+                .addEventListener(
+                    "input",
+                    function() {{
+    
+                        searchProjects();
+    
+                    }}
+                );
+    
+        </script>
+        """
 
+    fmap.get_root().html.add_child(
+        Element(search_html)
+    )
+    
+    
 
 def build_map(projects):
     if not projects:
