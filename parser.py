@@ -140,17 +140,11 @@ def projects_to_records(projects, company, source_filename):
 # UI
 # --------------------------------------------------------------------------
 
-st.set_page_config(page_title="Grid Project Extractor", layout="wide")
-st.title("⚡ Power Grid Project Extractor")
-st.caption("Upload a project PDF → Gemini extracts project details as JSON, with coordinates left blank for Overpass to fill in later.")
+st.set_page_config(page_title="Upload New Utility", layout="wide")
+st.title("Upload New Utility")
+st.caption("Only accepts PDF file. Uses Gemini to parse through the document and insert the projects onto the map.")
 
 with st.sidebar:
-    st.header("Settings")
-    if GEMINI_API_KEY:
-        st.success("Gemini API key loaded from .env")
-    else:
-        st.error("GEMINI_API_KEY not found in .env")
-    model_name = st.text_input("Model", value=DEFAULT_MODEL)
     timeout_s = st.slider("Request timeout (seconds)", 30, 300, 120)
 
     st.divider()
@@ -180,7 +174,7 @@ if run_button:
         with st.spinner(f"Calling Gemini (timeout set to {timeout_s}s)..."):
             client = genai.Client(api_key=GEMINI_API_KEY, http_options={"timeout": timeout_s * 1000})
             pdf_bytes = pdf_file.getvalue()
-            projects = extract_projects_from_pdf(client, model_name, pdf_bytes, company, timeout_s)
+            projects = extract_projects_from_pdf(client, pdf_bytes, company, timeout_s)
             st.session_state.records = projects_to_records(projects, company, pdf_file.name)
         st.toast(f"Done in {time.time() - t0:.1f}s")
     except Exception as e:
