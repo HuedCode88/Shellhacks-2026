@@ -486,7 +486,21 @@ def build_overlap_table(desc_projects, gpc_projects):
             })
 
     # Primary signal is geographic closeness; sort by distance first.
-    overlaps.sort(key=lambda r: r["distance_km"])
+    TIER_PRIORITY = {
+        "Touching / Crossing -- must coordinate (outage timing, crossing structures)": 0,
+        "Under 1.6 km -- can share the right-of-way (access roads, permits)": 1,
+        "Under 8 km -- can share site logistics (laydown yards, deliveries)": 2,
+        "Under 40 km -- can share crews & equipment": 3,
+    }
+
+    overlaps.sort(
+        key=lambda r: (
+            TIER_PRIORITY.get(r["geographic_tier"], 99),
+            r["distance_km"],
+            r["day_gap"] if r["day_gap"] is not None else float("inf")
+        )
+    )
+
 
     return overlaps
 
