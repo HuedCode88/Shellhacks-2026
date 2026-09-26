@@ -2,7 +2,7 @@
 
 Examples:
     python preload_point_tiles.py --dry-run
-    python preload_point_tiles.py --radius 3 --min-zoom 5 --max-zoom 17
+    python preload_point_tiles.py --coverage us-and-projects --min-zoom 3 --max-zoom 8
 """
 
 import argparse
@@ -25,6 +25,12 @@ from main import (
 
 OSM_USER_AGENT = "Shellhacks-2026-point-tile-preloader/1.0 (local visualization)"
 TILE_URL = "https://tile.openstreetmap.org/{zoom}/{x}/{y}.png"
+US_BOUNDS = {
+    "min_lat": 24.0,
+    "max_lat": 50.0,
+    "min_lon": -125.0,
+    "max_lon": -66.0,
+}
 
 
 def build_tile_manifest(projects, min_zoom, max_zoom, radius, focus_zoom=10, focus_span=8):
@@ -50,6 +56,21 @@ def build_tile_manifest(projects, min_zoom, max_zoom, radius, focus_zoom=10, foc
                     if 0 <= tile_x < tile_count and 0 <= tile_y < tile_count:
                         manifest.add((zoom, tile_x, tile_y))
     return sorted(manifest)
+
+
+def build_us_manifest(min_zoom, max_zoom):
+    """Return tiles covering the contiguous United States at moderate zooms."""
+    manifest = set()
+    for zoom in range(min_zoom, max_zoom + 1):
+        tile_count = 2 ** zoom
+        min_x = max(0, int(lon_to_tile_x(US_BOUNDS["min_lon"], zoom)))
+        max_x = min(tile_count - 1, int(lon_to_tile_x(US_BOUNDS["max_lon"], zoom)))
+        min_y = max(0, int(lat_to_tile_y(US_BOUNDS["max_lat"], zoom)))
+        max_y = min(tile_count - 1, int(lat_to_tile_y(US_BOUNDS["min_lat"], zoom)))
+        for tile_x in range(min_x, max_x + 1):
+            for tile_y in range(min_y, max_y + 1):
+                manifest.add((zoom, tile_x, tile_y))
+    return manifest
 
 
 def tile_path(tile):
@@ -191,12 +212,12 @@ def main():
     parser = argparse.ArgumentParser(
         description="Download OSM tiles around every geocoded project."
     )
-    parser.add_argument("--min-zoom", type=int, default=5)
+    parser.add_argument("--min-zoom", type=int, default=3)
     parser.add_argument(
         "--max-zoom",
         type=int,
-        default=17,
-        help="Maximum OSM detail level; 17 is suitable for close street context.",
+        default=8,
+        help="Maximum moderate-detail level for the broad U.S. preload.",
     )
     parser.add_argument(
         "--radius",
@@ -205,10 +226,16 @@ def main():
         help="Tiles in each direction; radius 3 means a 7x7 area around each point.",
     )
     parser.add_argument(
+        "--coverage",
+        choices=("projects", "us", "us-and-projects"),
+        default="us-and-projects",
+        help="Preload project neighborhoods, the contiguous U.S., or both.",
+    )
+    parser.add_argument(
         "--focus-zoom",
         type=int,
-        default=10,
-        help="Zoom level used when the search bar focuses a project.",
+        default=6,
+        help="Moderate project-focus zoom included in the broad preload.",
     )
     parser.add_argument(
         "--focus-span",
@@ -252,14 +279,12 @@ def main():
         parser.error("processes * workers must not exceed 32 total downloads")
 
     projects = load_projects(EXCEL_FILE)
-    manifest = build_tile_manifest(
-        projects,
-        args.min_zoom,
-        args.max_zoom,
-        args.radius,
-        args.focus_zoom,
-        args.focus_span,
-    )
+    manifest = set()
+    if args.coverage in ("projects", "us-and-projects"):
+        manifest.update(build_tile_manifest(projects, args.min_zoom, args.max_zoom, args.radius, args.focus_zoom, args.focus_span))
+    if args.coverage in ("us", "us-and-projects"):
+        manifest.update(build_us_manifest(args.min_zoom, args.max_zoom))
+    manifest = sorted(manifest)
     missing = [tile for tile in manifest if not os.path.isfile(tile_path(tile))]
     print(f"Projects: {len(projects)}")
     print(f"Tile manifest: {len(manifest)} unique tiles")
