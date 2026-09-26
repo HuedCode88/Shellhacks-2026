@@ -1,0 +1,7 @@
+.env
+uploaded_projects.json
+.uploaded_projects_*.json
+projects.sqlite3
+projects.sqlite3-shm
+projects.sqlite3-wal
+__pycache__/
