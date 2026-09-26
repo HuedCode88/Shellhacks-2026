@@ -1,234 +1,386 @@
-"""
-Maps every geocoded project in the workbook onto a real,
-interactive OpenStreetMap-based map (via Folium/Leaflet) and saves
-it as a standalone HTML file you can open in any browser.
+"""Interactive 3D OpenStreetMap floor with geocoded project markers."""
 
-Unlike the in-chat map tool, this has no marker limit, combines
-both utilities on one map, and can be re-run any time the workbook
-is updated -- just run:
-
-    pip install openpyxl folium
-    python map_projects.py
-
-It looks for the workbook in the same folder as this script by
-default; change EXCEL_FILE below if yours lives elsewhere.
-"""
-
+import math
 import os
+from io import BytesIO
+
 import openpyxl
-import folium
-from folium.plugins import MarkerCluster
+import pygame
+import requests
+from OpenGL.GL import *
+from OpenGL.GLU import *
+from PIL import Image
+from pygame.locals import DOUBLEBUF, OPENGL
+from project_ui import ProjectInfoPanel
 
-EXCEL_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "gridlock_project_tables_geocoded_nominatim (1).xlsx"
-)
 
-OUTPUT_HTML = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "project_map.html"
-)
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+EXCEL_FILE = os.path.join(BASE_DIR, "gridlock_project_tables_geocoded_nominatim.xlsx")
+WINDOW_SIZE = (1200, 800)
+TILE_ZOOM = 8
+TILE_SIZE = 256
+MAX_TILE_GRID = 8
+OSM_USER_AGENT = "Shellhacks-2026-3D-map/1.0 (local visualization)"
 
-# Which column identifies a project's category on each sheet, and
-# what color to draw that category's markers in. Folium's built-in
-# Icon colors are a fixed palette (not arbitrary hex), so we map
-# categories onto the closest ones.
 SHEET_CATEGORY_FIELD = {
     "DESC Geocoded": "Status",
     "GA ITS Geocoded": "Sponsor (GPC/GTC/MEAG/DU/SAV)",
 }
 
 CATEGORY_COLORS = {
-    ("DESC Geocoded", "In Progress"): "green",
-    ("DESC Geocoded", "Planned"): "orange",
-
-    ("GA ITS Geocoded", "GPC"): "blue",
-    ("GA ITS Geocoded", "GTC"): "purple",
-    ("GA ITS Geocoded", "SAV"): "pink",
-    ("GA ITS Geocoded", "MEAG"): "cadetblue",
-    ("GA ITS Geocoded", "DU"): "darkred",
-}
-
-DEFAULT_COLOR = "gray"
-
-ID_FIELD_CANDIDATES = ["Project ID", "TEAMS Number"]
-NAME_FIELD = "Project Name / Endpoints (raw title)"
-
-# Extra fields to show in each marker's popup, per sheet, in order.
-# Only fields that exist and have a value are shown.
-POPUP_FIELDS = {
-    "DESC Geocoded": ["Status", "Planned In-Service Date", "Description", "confidence"],
-    "GA ITS Geocoded": ["Sponsor (GPC/GTC/MEAG/DU/SAV)", "Need / In-Service Date", "Zone", "confidence"],
+    ("DESC Geocoded", "In Progress"): (0.1, 0.85, 0.3),
+    ("DESC Geocoded", "Planned"): (1.0, 0.55, 0.05),
+    ("GA ITS Geocoded", "GPC"): (0.15, 0.45, 1.0),
+    ("GA ITS Geocoded", "GTC"): (0.75, 0.2, 1.0),
+    ("GA ITS Geocoded", "SAV"): (1.0, 0.3, 0.65),
+    ("GA ITS Geocoded", "MEAG"): (0.1, 0.75, 0.8),
+    ("GA ITS Geocoded", "DU"): (0.9, 0.2, 0.15),
 }
 
 
 def safe_float(value):
-    """Coerces a coordinate cell to a float, tolerating stray commas/whitespace."""
-
     if value is None:
         return None
-
-    if isinstance(value, (int, float)):
+    try:
         return float(value)
-
-    if isinstance(value, str):
-
-        text = value.strip()
-
-        try:
-            return float(text)
-        except ValueError:
-            pass
-
-        parts = [p.strip() for p in text.split(",") if p.strip()]
-
-        for part in reversed(parts):
-            try:
-                return float(part)
-            except ValueError:
-                continue
-
-    return None
-
-
-def _row_dict(header, row):
-    return {header[i]: row[i] for i in range(len(header))}
+    except (TypeError, ValueError):
+        return None
 
 
 def load_projects(path):
-    """
-    Reads every sheet in the workbook and returns one dict per row
-    that has a valid center_lat/center_lon -- rows the geocoder
-    marked UNMATCHED are skipped since there's nowhere to plot them.
-    """
-
-    wb = openpyxl.load_workbook(path, data_only=True)
-
+    workbook = openpyxl.load_workbook(path, data_only=True, read_only=True)
     projects = []
 
-    for sheet_name in wb.sheetnames:
-
-        ws = wb[sheet_name]
-
-        rows = list(ws.iter_rows(values_only=True))
-
-        if not rows:
+    for sheet_name, category_field in SHEET_CATEGORY_FIELD.items():
+        if sheet_name not in workbook.sheetnames:
             continue
 
-        header = rows[0]
+        rows = workbook[sheet_name].iter_rows(values_only=True)
+        header = next(rows, None)
+        if not header:
+            continue
 
-        category_field = SHEET_CATEGORY_FIELD.get(sheet_name)
-        popup_fields = POPUP_FIELDS.get(sheet_name, [])
-
-        for row in rows[1:]:
-
-            record = _row_dict(header, row)
-
-            raw_lat = record.get("center_lat")
-            raw_lon = record.get("center_lon")
-
-            lat = safe_float(raw_lat)
-            lon = safe_float(raw_lon)
-
-            if lat is None or lon is None:
-
-                if raw_lat is not None or raw_lon is not None:
-                    print(
-                        f"Skipping row with unparseable coordinates "
-                        f"in '{sheet_name}': lat={raw_lat!r} lon={raw_lon!r}"
-                    )
-
+        for row in rows:
+            record = dict(zip(header, row))
+            latitude = safe_float(record.get("center_lat"))
+            longitude = safe_float(record.get("center_lon"))
+            if latitude is None or longitude is None:
                 continue
 
-            project_id = None
-
-            for field in ID_FIELD_CANDIDATES:
-
-                if field in record and record[field] is not None:
-                    project_id = record[field]
-                    break
-
-            category = record.get(category_field) if category_field else None
-
-            popup_lines = []
-
-            for field in popup_fields:
-
-                value = record.get(field)
-
-                if value is not None and str(value).strip():
-                    popup_lines.append(f"<b>{field}:</b> {value}")
-
+            category = record.get(category_field)
+            project_id = record.get("Project ID") or record.get("TEAMS Number")
+            detail_fields = (
+                "Status",
+                "Description",
+                "Need / Area Note",
+                "Planned In-Service Date",
+                "Need / In-Service Date",
+                "Sponsor (GPC/GTC/MEAG/DU/SAV)",
+                "Zone",
+                "Year Filed",
+                "confidence",
+            )
+            details = {
+                field: record[field]
+                for field in detail_fields
+                if record.get(field) is not None and str(record[field]).strip()
+            }
             projects.append({
                 "sheet": sheet_name,
                 "id": project_id,
-                "name": record.get(NAME_FIELD),
-                "category": category,
-                "lat": lat,
-                "lon": lon,
-                "popup_lines": popup_lines,
-                "color": CATEGORY_COLORS.get((sheet_name, category), DEFAULT_COLOR),
+                "name": record.get("Project Name / Endpoints (raw title)") or "Unnamed project",
+                "category": category or "Uncategorized",
+                "lat": latitude,
+                "lon": longitude,
+                "color": CATEGORY_COLORS.get(
+                    (sheet_name, category),
+                    (0.95, 0.9, 0.1),
+                ),
+                "details": details,
             })
 
+    if not projects:
+        raise ValueError("No geocoded projects with center_lat/center_lon were found.")
     return projects
 
 
-def build_map(projects, output_path):
+def lon_to_tile_x(longitude, zoom):
+    return (longitude + 180.0) / 360.0 * (2 ** zoom)
 
-    if not projects:
-        raise ValueError("No geocoded projects found -- nothing to map.")
 
-    center_lat = sum(p["lat"] for p in projects) / len(projects)
-    center_lon = sum(p["lon"] for p in projects) / len(projects)
+def lat_to_tile_y(latitude, zoom):
+    latitude = max(-85.05112878, min(85.05112878, latitude))
+    radians = math.radians(latitude)
+    return (1.0 - math.asinh(math.tan(radians)) / math.pi) / 2.0 * (2 ** zoom)
 
-    fmap = folium.Map(
-        location=[center_lat, center_lon],
-        zoom_start=7,
-        tiles="OpenStreetMap",
+
+def choose_tile_zoom(projects):
+    """Choose the highest zoom that keeps every project in the tile mosaic."""
+    min_lat = min(project["lat"] for project in projects)
+    max_lat = max(project["lat"] for project in projects)
+    min_lon = min(project["lon"] for project in projects)
+    max_lon = max(project["lon"] for project in projects)
+
+    for zoom in range(8, 1, -1):
+        tile_width = math.floor(lon_to_tile_x(max_lon, zoom)) - math.floor(lon_to_tile_x(min_lon, zoom)) + 3
+        tile_height = math.floor(lat_to_tile_y(min_lat, zoom)) - math.floor(lat_to_tile_y(max_lat, zoom)) + 3
+        if tile_width <= MAX_TILE_GRID and tile_height <= MAX_TILE_GRID:
+            return zoom
+
+    return 2
+
+
+def download_map_texture(projects):
+    """Download nearby OSM tiles and return a texture plus geographic bounds."""
+    global TILE_ZOOM
+    TILE_ZOOM = choose_tile_zoom(projects)
+    print(f"Using OpenStreetMap zoom level {TILE_ZOOM} for the full project extent.")
+
+    min_lat = min(project["lat"] for project in projects)
+    max_lat = max(project["lat"] for project in projects)
+    min_lon = min(project["lon"] for project in projects)
+    max_lon = max(project["lon"] for project in projects)
+
+    center_lat = (min_lat + max_lat) / 2.0
+    center_lon = (min_lon + max_lon) / 2.0
+    center_x = lon_to_tile_x(center_lon, TILE_ZOOM)
+    center_y = lat_to_tile_y(center_lat, TILE_ZOOM)
+    tile_count = 2 ** TILE_ZOOM
+
+    min_x = max(0, math.floor(lon_to_tile_x(min_lon, TILE_ZOOM)) - 1)
+    max_x = min(tile_count - 1, math.floor(lon_to_tile_x(max_lon, TILE_ZOOM)) + 1)
+    min_y = max(0, math.floor(lat_to_tile_y(max_lat, TILE_ZOOM)) - 1)
+    max_y = min(tile_count - 1, math.floor(lat_to_tile_y(min_lat, TILE_ZOOM)) + 1)
+
+    texture_image = Image.new(
+        "RGB",
+        ((max_x - min_x + 1) * TILE_SIZE, (max_y - min_y + 1) * TILE_SIZE),
+        (45, 52, 58),
+    )
+    session = requests.Session()
+    session.headers.update({"User-Agent": OSM_USER_AGENT})
+
+    for tile_x in range(min_x, max_x + 1):
+        for tile_y in range(min_y, max_y + 1):
+            url = f"https://tile.openstreetmap.org/{TILE_ZOOM}/{tile_x}/{tile_y}.png"
+            try:
+                response = session.get(url, timeout=15)
+                response.raise_for_status()
+                tile = Image.open(BytesIO(response.content)).convert("RGB")
+                texture_image.paste(
+                    tile,
+                    ((tile_x - min_x) * TILE_SIZE, (tile_y - min_y) * TILE_SIZE),
+                )
+            except requests.RequestException as error:
+                print(f"Could not download map tile: {error}")
+
+    return texture_image, min_x, min_y, center_x, center_y
+
+
+def make_texture(image):
+    texture_id = glGenTextures(1)
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexImage2D(
+        GL_TEXTURE_2D,
+        0,
+        GL_RGB,
+        image.width,
+        image.height,
+        0,
+        GL_RGB,
+        GL_UNSIGNED_BYTE,
+        image.tobytes(),
+    )
+    return texture_id
+
+
+def setup_opengl(width, height):
+    glViewport(0, 0, width, height)
+    glMatrixMode(GL_PROJECTION)
+    glLoadIdentity()
+    gluPerspective(55.0, width / height, 0.1, 1000.0)
+    glMatrixMode(GL_MODELVIEW)
+    glEnable(GL_DEPTH_TEST)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+
+
+def draw_floor(texture_id, image, min_x, min_y, center_x, center_y):
+    world_width = image.width / TILE_SIZE * 40.0
+    world_depth = image.height / TILE_SIZE * 40.0
+    floor_x = (min_x - center_x) * 40.0
+    floor_z = (min_y - center_y) * 40.0
+
+    glEnable(GL_TEXTURE_2D)
+    glBindTexture(GL_TEXTURE_2D, texture_id)
+    glColor3f(1.0, 1.0, 1.0)
+    glBegin(GL_QUADS)
+    glTexCoord2f(0.0, 0.0)
+    glVertex3f(floor_x, 0.0, floor_z)
+    glTexCoord2f(1.0, 0.0)
+    glVertex3f(floor_x + world_width, 0.0, floor_z)
+    glTexCoord2f(1.0, 1.0)
+    glVertex3f(floor_x + world_width, 0.0, floor_z + world_depth)
+    glTexCoord2f(0.0, 1.0)
+    glVertex3f(floor_x, 0.0, floor_z + world_depth)
+    glEnd()
+    glDisable(GL_TEXTURE_2D)
+
+
+def project_position(project, center_x, center_y):
+    return (
+        (lon_to_tile_x(project["lon"], TILE_ZOOM) - center_x) * 40.0,
+        (lat_to_tile_y(project["lat"], TILE_ZOOM) - center_y) * 40.0,
     )
 
-    # One toggleable layer per sheet, so you can hide/show DESC vs
-    # GA ITS independently from the layer control in the corner.
-    layers = {}
 
-    for p in projects:
+def draw_marker(project, center_x, center_y, quadric, selected=False):
+    x, z = project_position(project, center_x, center_y)
+    red, green, blue = project["color"]
+    marker_radius = 1.8 if selected else 1.2
+    glColor3f(red, green, blue)
+    glPushMatrix()
+    glTranslatef(x, marker_radius, z)
+    gluSphere(quadric, marker_radius, 12, 8)
+    glPopMatrix()
+    glBegin(GL_LINES)
+    glVertex3f(x, 0.0, z)
+    glVertex3f(x, marker_radius, z)
+    glEnd()
 
-        sheet = p["sheet"]
 
-        if sheet not in layers:
-            layers[sheet] = folium.FeatureGroup(name=sheet)
-            layers[sheet].add_to(fmap)
+def pick_project(projects, click_position, center_x, center_y):
+    """Return the closest marker under a screen-space click."""
+    viewport = glGetIntegerv(GL_VIEWPORT)
+    window_height = viewport[3]
+    click_x, click_y = click_position
+    click_y = window_height - click_y
+    closest_project = None
+    closest_distance = 18.0
 
-        title_bits = [str(p["name"])]
+    for project in projects:
+        x, z = project_position(project, center_x, center_y)
+        screen_x, screen_y, depth = gluProject(x, 1.2, z)
+        distance = math.hypot(screen_x - click_x, screen_y - click_y)
+        if 0.0 <= depth <= 1.0 and distance < closest_distance:
+            closest_project = project
+            closest_distance = distance
 
-        if p["id"] is not None:
-            title_bits.append(f"[{p['id']}]")
+    return closest_project
 
-        popup_html = f"<b>{' '.join(title_bits)}</b><br>"
-        popup_html += "<br>".join(p["popup_lines"])
 
-        folium.Marker(
-            location=[p["lat"], p["lon"]],
-            tooltip=" ".join(title_bits),
-            popup=folium.Popup(popup_html, max_width=350),
-            icon=folium.Icon(color=p["color"]),
-        ).add_to(layers[sheet])
+def describe_project(project):
+    return (
+        f"{project['name']} | {project['sheet']} | "
+        f"ID: {project['id'] or 'N/A'} | "
+        f"Category: {project['category']} | "
+        f"Lat: {project['lat']:.5f}, Lon: {project['lon']:.5f}"
+    )
 
-    folium.LayerControl(collapsed=False).add_to(fmap)
 
-    fmap.save(output_path)
+def draw_axes(length):
+    glLineWidth(2.0)
+    glBegin(GL_LINES)
+    glColor3f(1.0, 0.1, 0.1)
+    glVertex3f(0, 0.02, 0)
+    glVertex3f(length, 0.02, 0)
+    glColor3f(0.1, 1.0, 0.1)
+    glVertex3f(0, 0.02, 0)
+    glVertex3f(0, length, 0)
+    glColor3f(0.1, 0.4, 1.0)
+    glVertex3f(0, 0.02, 0)
+    glVertex3f(0, 0.02, length)
+    glEnd()
 
 
 def main():
-
     projects = load_projects(EXCEL_FILE)
-
     print(f"Loaded {len(projects)} geocoded projects.")
+    print("Downloading OpenStreetMap floor tiles...")
+    map_image, min_x, min_y, center_x, center_y = download_map_texture(projects)
 
-    build_map(projects, OUTPUT_HTML)
+    pygame.init()
+    pygame.display.set_mode(WINDOW_SIZE, DOUBLEBUF | OPENGL)
+    pygame.display.set_caption("3D Gridlock Project Map | © OpenStreetMap contributors")
+    setup_opengl(*WINDOW_SIZE)
+    texture_id = make_texture(map_image)
+    quadric = gluNewQuadric()
+    info_panel = ProjectInfoPanel(WINDOW_SIZE)
 
-    print(f"Map saved to: {OUTPUT_HTML}")
-    print("Open that file in a browser to view it.")
+    camera_distance = max(map_image.width, map_image.height) / TILE_SIZE * 26.0
+    camera_rotation_x = 52.0
+    camera_rotation_y = 0.0
+    mouse_down = False
+    mouse_down_position = (0, 0)
+    last_mouse_pos = (0, 0)
+    selected_project = None
+    clock = pygame.time.Clock()
+    running = True
+
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:
+                    mouse_down = True
+                    mouse_down_position = event.pos
+                    last_mouse_pos = event.pos
+                elif event.button == 4:
+                    camera_distance = max(8.0, camera_distance - 4.0)
+                elif event.button == 5:
+                    camera_distance = min(300.0, camera_distance + 4.0)
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
+                mouse_down = False
+                if math.dist(event.pos, mouse_down_position) <= 6.0:
+                    selected_project = pick_project(
+                        projects,
+                        event.pos,
+                        center_x,
+                        center_y,
+                    )
+                    if selected_project is None:
+                        info_panel.set_project(None)
+                        pygame.display.set_caption(
+                            "3D Gridlock Project Map | © OpenStreetMap contributors"
+                        )
+                    else:
+                        info_panel.set_project(selected_project)
+                        project_info = describe_project(selected_project)
+                        print(f"Selected: {project_info}")
+                        pygame.display.set_caption(project_info)
+            elif event.type == pygame.MOUSEMOTION and mouse_down:
+                delta_x = event.pos[0] - last_mouse_pos[0]
+                delta_y = event.pos[1] - last_mouse_pos[1]
+                camera_rotation_y += delta_x * 0.5
+                camera_rotation_x = max(15.0, min(85.0, camera_rotation_x + delta_y * 0.5))
+                last_mouse_pos = event.pos
+
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
+        glLoadIdentity()
+        glTranslatef(0.0, -4.0, -camera_distance)
+        glRotatef(camera_rotation_x, 1.0, 0.0, 0.0)
+        glRotatef(camera_rotation_y, 0.0, 1.0, 0.0)
+        draw_floor(texture_id, map_image, min_x, min_y, center_x, center_y)
+        draw_axes(12.0)
+        for project in projects:
+            draw_marker(
+                project,
+                center_x,
+                center_y,
+                quadric,
+                selected=project is selected_project,
+            )
+        info_panel.draw()
+        pygame.display.flip()
+        clock.tick(60)
+
+    gluDeleteQuadric(quadric)
+    glDeleteTextures([texture_id])
+    info_panel.close()
+    pygame.quit()
 
 
 if __name__ == "__main__":
