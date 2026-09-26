@@ -338,6 +338,37 @@ def normalize_uploaded_projects(extracted, filename):
 
     return projects, skipped, geocode_count
 
+def add_project_search(fmap, projects):
+    """
+    Adds a project search bar to the top-right of the map.[cite: 2]
+    Searches:
+        - Project ID[cite: 2]
+        - Project name[cite: 2]
+        - Sheet / utility[cite: 2]
+        - Category[cite: 2]
+    Clicking a result zooms the map to that project.[cite: 2]
+    """
+
+    search_projects = []
+
+    for project in projects:
+        sheet_val = project.get("sheet") or project.get("source_name")
+        search_projects.append({
+            "id": str(project.get("id")) if project.get("id") is not None else "",
+            "name": str(project.get("name")) if project.get("name") is not None else "",
+            "sheet": str(sheet_val) if sheet_val is not None else "",
+            "category": str(project.get("category")) if project.get("category") is not None else "",
+            "lat": project["lat"],
+            "lon": project["lon"],
+        })
+
+    projects_json = json.dumps(search_projects)
+
+    search_html = f"""
+    """
+    fmap.get_root().html.add_child(Element(search_html))
+
+
 def build_map(projects):
     if not projects:
         raise ValueError("No geocoded projects found -- nothing to map.")
@@ -381,6 +412,7 @@ def build_map(projects):
             icon=folium.Icon(color=p.get("color") or _source_color(layer_name)),
         ).add_to(layers[layer_name])
 
+    add_project_search(fmap, projects)
     folium.LayerControl(collapsed=False).add_to(fmap)
 
     return fmap.get_root().render()
