@@ -86,6 +86,13 @@ def load_projects(path):
                 "Zone",
                 "Year Filed",
                 "confidence",
+                "endpoints_tried",
+                "matched_endpoint_1",
+                "matched_endpoint_2",
+                "osm_name_1",
+                "osm_name_2",
+                "score_1",
+                "score_2",
             )
             details = {
                 field: record[field]
@@ -470,6 +477,7 @@ def main(preload=False):
     texture_id = make_texture(map_image)
     quadric = gluNewQuadric()
     info_panel = ProjectInfoPanel(window_size)
+    info_panel.set_projects(projects)
 
     camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
     camera_rotation_x = 52.0
@@ -488,8 +496,29 @@ def main(preload=False):
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
-            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
-                running = False
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_ESCAPE:
+                    if info_panel.search_active:
+                        info_panel.close_search()
+                    else:
+                        running = False
+                elif event.key == pygame.K_f and event.mod & pygame.KMOD_CTRL:
+                    info_panel.begin_search()
+                elif info_panel.search_active and event.key == pygame.K_BACKSPACE:
+                    info_panel.remove_search_character()
+                elif info_panel.search_active and event.key == pygame.K_RETURN:
+                    search_result = info_panel.choose_search_result()
+                    if search_result is not None:
+                        selected_project = search_result
+                        camera_offset_x, camera_offset_z = project_position(
+                            selected_project,
+                            center_x,
+                            center_y,
+                        )
+                        info_panel.set_project(selected_project)
+                        pygame.display.set_caption(describe_project(selected_project))
+            elif event.type == pygame.TEXTINPUT and info_panel.search_active:
+                info_panel.append_search_text(event.text)
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
                     mouse_down = True
