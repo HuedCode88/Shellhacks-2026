@@ -1,20 +1,24 @@
 """
-Maps every geocoded project in the workbook onto a real,
-interactive OpenStreetMap-based map (via Folium/Leaflet) and saves
-it as a standalone HTML file you can open in any browser.
+Maps every geocoded project in the workbook onto an interactive
+OpenStreetMap-based webpage (via Folium/Leaflet).
 
 Unlike the in-chat map tool, this has no marker limit, combines
 both utilities on one map, and can be re-run any time the workbook
 is updated -- just run:
 
     pip install openpyxl folium
-    python map_projects.py
+    python main.py
 
-It looks for the workbook in the same folder as this script by
-default; change EXCEL_FILE below if yours lives elsewhere.
+Open the local URL printed by the script in a browser. The map reads
+the workbook again whenever the page is requested, so refreshing it
+shows workbook updates. The workbook must be in this folder.
 """
 
 import os
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Lock
+from urllib.parse import urlsplit
+
 import openpyxl
 import folium
 from folium.plugins import MarkerCluster
@@ -24,10 +28,7 @@ EXCEL_FILE = os.path.join(
     "gridlock_project_tables_geocoded_nominatim (1).xlsx"
 )
 
-OUTPUT_HTML = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)),
-    "project_map.html"
-)
+MAP_RENDER_LOCK = Lock()
 
 # Which column identifies a project's category on each sheet, and
 # what color to draw that category's markers in. Folium's built-in
@@ -173,7 +174,7 @@ def load_projects(path):
     return projects
 
 
-def build_map(projects, output_path):
+def build_map(projects):
 
     if not projects:
         raise ValueError("No geocoded projects found -- nothing to map.")
@@ -216,7 +217,56 @@ def build_map(projects, output_path):
 
     folium.LayerControl(collapsed=False).add_to(fmap)
 
-    fmap.save(output_path)
+    return fmap.get_root().render()
+
+
+class ProjectMapHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+
+        if urlsplit(self.path).path not in ("/", "/project_map.html"):
+            self.send_error(404)
+            return
+
+        try:
+            with MAP_RENDER_LOCK:
+                projects = load_projects(EXCEL_FILE)
+                page = build_map(projects).encode("utf-8")
+        except (OSError, ValueError) as error:
+            self.send_error(500, str(error))
+            return
+
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(page)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(page)
+
+
+def serve_map():
+
+    server = None
+
+    for port in range(8000, 8011):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", port), ProjectMapHandler)
+            break
+        except OSError:
+            continue
+
+    if server is None:
+        raise RuntimeError("No available local port between 8000 and 8010.")
+
+    print(f"Interactive map available at http://127.0.0.1:{server.server_port}/")
+    print("Refresh the page to load the latest workbook data. Press Ctrl+C to stop.")
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nMap server stopped.")
+    finally:
+        server.server_close()
 
 
 def main():
@@ -224,11 +274,7 @@ def main():
     projects = load_projects(EXCEL_FILE)
 
     print(f"Loaded {len(projects)} geocoded projects.")
-
-    build_map(projects, OUTPUT_HTML)
-
-    print(f"Map saved to: {OUTPUT_HTML}")
-    print("Open that file in a browser to view it.")
+    serve_map()
 
 
 if __name__ == "__main__":
