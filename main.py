@@ -11,6 +11,7 @@ from OpenGL.GL import *
 from OpenGL.GLU import *
 from PIL import Image
 from pygame.locals import DOUBLEBUF, OPENGL
+from overlap_logic import build_project_overlaps
 from project_ui import ProjectInfoPanel
 
 
@@ -97,10 +98,16 @@ def load_projects(path):
                     (0.95, 0.9, 0.1),
                 ),
                 "details": details,
+                "date_field": (
+                    "Planned In-Service Date"
+                    if sheet_name == "DESC Geocoded"
+                    else "Need / In-Service Date"
+                ),
             })
 
     if not projects:
         raise ValueError("No geocoded projects with center_lat/center_lon were found.")
+    build_project_overlaps(projects)
     return projects
 
 
@@ -295,9 +302,38 @@ def draw_axes(length):
     glEnd()
 
 
+def draw_overlap_lines(overlaps, center_x, center_y):
+    """Render the 2D mockup's cross-project relationships on the 3D floor."""
+    glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_DEPTH_BUFFER_BIT)
+    glDisable(GL_DEPTH_TEST)
+    glDisable(GL_TEXTURE_2D)
+    glEnable(GL_BLEND)
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
+    glLineWidth(4.0)
+    for overlap in overlaps:
+        first_x, first_z = project_position(overlap["first"], center_x, center_y)
+        second_x, second_z = project_position(overlap["second"], center_x, center_y)
+        red, green, blue = overlap["color"]
+        glColor4f(red, green, blue, 0.65)
+        glBegin(GL_LINES)
+        glVertex3f(first_x, 0.12, first_z)
+        glVertex3f(second_x, 0.12, second_z)
+        glEnd()
+    glPopAttrib()
+    return len(overlaps)
+
+
 def main():
     projects = load_projects(EXCEL_FILE)
+    overlaps = [
+        overlap
+        for project in projects
+        for overlap in project.get("overlaps", [])
+        if overlap["first"] is project
+    ]
     print(f"Loaded {len(projects)} geocoded projects.")
+    print(f"Found {len(overlaps)} geographic project overlaps.")
+    print(f"Overlap checker: {len(overlaps)} relationships processed; line rendering enabled.")
     print("Downloading OpenStreetMap floor tiles...")
     map_image, min_x, min_y, center_x, center_y = download_map_texture(projects)
 
@@ -312,10 +348,13 @@ def main():
     camera_distance = max(map_image.width, map_image.height) / TILE_SIZE * 26.0
     camera_rotation_x = 52.0
     camera_rotation_y = 0.0
+    camera_offset_x = 0.0
+    camera_offset_z = 0.0
     mouse_down = False
     mouse_down_position = (0, 0)
     last_mouse_pos = (0, 0)
     selected_project = None
+    pending_click = None
     clock = pygame.time.Clock()
     running = True
 
@@ -335,22 +374,7 @@ def main():
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 mouse_down = False
                 if math.dist(event.pos, mouse_down_position) <= 6.0:
-                    selected_project = pick_project(
-                        projects,
-                        event.pos,
-                        center_x,
-                        center_y,
-                    )
-                    if selected_project is None:
-                        info_panel.set_project(None)
-                        pygame.display.set_caption(
-                            "3D Gridlock Project Map | © OpenStreetMap contributors"
-                        )
-                    else:
-                        info_panel.set_project(selected_project)
-                        project_info = describe_project(selected_project)
-                        print(f"Selected: {project_info}")
-                        pygame.display.set_caption(project_info)
+                    pending_click = event.pos
             elif event.type == pygame.MOUSEMOTION and mouse_down:
                 delta_x = event.pos[0] - last_mouse_pos[0]
                 delta_y = event.pos[1] - last_mouse_pos[1]
@@ -358,12 +382,45 @@ def main():
                 camera_rotation_x = max(15.0, min(85.0, camera_rotation_x + delta_y * 0.5))
                 last_mouse_pos = event.pos
 
+        frame_seconds = clock.get_time() / 1000.0
+        pressed_keys = pygame.key.get_pressed()
+        movement_speed = 42.0 if pressed_keys[pygame.K_LSHIFT] or pressed_keys[pygame.K_RSHIFT] else 18.0
+        movement = movement_speed * frame_seconds
+        if pressed_keys[pygame.K_w]:
+            camera_offset_z -= movement
+        if pressed_keys[pygame.K_s]:
+            camera_offset_z += movement
+        if pressed_keys[pygame.K_a]:
+            camera_offset_x -= movement
+        if pressed_keys[pygame.K_d]:
+            camera_offset_x += movement
+
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
         glTranslatef(0.0, -4.0, -camera_distance)
         glRotatef(camera_rotation_x, 1.0, 0.0, 0.0)
         glRotatef(camera_rotation_y, 0.0, 1.0, 0.0)
+        glTranslatef(-camera_offset_x, 0.0, -camera_offset_z)
+        if pending_click is not None:
+            selected_project = pick_project(
+                projects,
+                pending_click,
+                center_x,
+                center_y,
+            )
+            pending_click = None
+            info_panel.set_project(selected_project)
+            if selected_project is None:
+                pygame.display.set_caption(
+                    "3D Gridlock Project Map | © OpenStreetMap contributors"
+                )
+            else:
+                project_info = describe_project(selected_project)
+                print(f"Selected: {project_info}")
+                pygame.display.set_caption(project_info)
         draw_floor(texture_id, map_image, min_x, min_y, center_x, center_y)
+        rendered_overlap_lines = draw_overlap_lines(overlaps, center_x, center_y)
+        info_panel.set_overlap_status(len(overlaps), rendered_overlap_lines)
         draw_axes(12.0)
         for project in projects:
             draw_marker(

@@ -5,7 +5,7 @@ from OpenGL.GL import *
 class ProjectInfoPanel:
     """Draws selected workbook project data as an in-window OpenGL overlay."""
 
-    PANEL_SIZE = (440, 272)
+    PANEL_SIZE = (390, 224)
 
     def __init__(self, window_size):
         self.window_width, self.window_height = window_size
@@ -15,11 +15,19 @@ class ProjectInfoPanel:
         self.small_font = pygame.font.Font(None, 17)
         self.texture_id = glGenTextures(1)
         self.selected_project = None
+        self.overlap_count = 0
+        self.overlap_lines_rendered = 0
         self.dirty = True
 
     def set_project(self, project):
         if project is not self.selected_project:
             self.selected_project = project
+            self.dirty = True
+
+    def set_overlap_status(self, processed, rendered):
+        if processed != self.overlap_count or rendered != self.overlap_lines_rendered:
+            self.overlap_count = processed
+            self.overlap_lines_rendered = rendered
             self.dirty = True
 
     def _fit_text(self, text, font, width):
@@ -41,6 +49,26 @@ class ProjectInfoPanel:
 
         project = self.selected_project
         if project is None:
+            self.surface.blit(
+                self.title_font.render("Select a job marker", True, (235, 247, 255)),
+                (18, 18),
+            )
+            self.surface.blit(
+                self.body_font.render("Click a colored 3D point to inspect its XLSX data.", True, (205, 220, 232)),
+                (18, 56),
+            )
+            self.surface.blit(
+                self.body_font.render("WASD move | Shift: faster | Drag: orbit | Wheel: zoom", True, (205, 220, 232)),
+                (18, 84),
+            )
+            self.surface.blit(
+                self.body_font.render(
+                    f"Overlap checker: {self.overlap_count} processed | {self.overlap_lines_rendered} lines",
+                    True,
+                    (120, 240, 160) if self.overlap_count == self.overlap_lines_rendered else (255, 190, 80),
+                ),
+                (18, 112),
+            )
             return
 
         margin = 18
@@ -71,6 +99,32 @@ class ProjectInfoPanel:
         ):
             if field in details:
                 lines.append((field, details[field]))
+
+        overlaps = project.get("overlaps", [])
+        if overlaps:
+            lines.append(("Nearby coordination", f"{len(overlaps)} related job(s)"))
+            for overlap in overlaps[:2]:
+                other_project = (
+                    overlap["second"]
+                    if overlap["first"] is project
+                    else overlap["first"]
+                )
+                timeline = (
+                    "Unknown"
+                    if overlap["timeline_overlap"] is None
+                    else "Yes"
+                    if overlap["timeline_overlap"]
+                    else "No"
+                )
+                lines.append(
+                    (
+                        "Overlap",
+                        f"{other_project['name']} | {overlap['distance_mi']} mi | "
+                        f"Timeline: {timeline}",
+                    )
+                )
+
+            lines.append(("Overlap checker", f"{self.overlap_count} processed / {self.overlap_lines_rendered} lines"))
 
         y = 52
         for label, value in lines:
@@ -106,8 +160,6 @@ class ProjectInfoPanel:
         self.dirty = False
 
     def draw(self):
-        if self.selected_project is None:
-            return
         if self.dirty:
             self._upload_texture()
 
