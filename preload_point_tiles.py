@@ -27,16 +27,26 @@ OSM_USER_AGENT = "Shellhacks-2026-point-tile-preloader/1.0 (local visualization)
 TILE_URL = "https://tile.openstreetmap.org/{zoom}/{x}/{y}.png"
 
 
-def build_tile_manifest(projects, min_zoom, max_zoom, radius):
-    """Return unique (zoom, x, y) tiles surrounding every project."""
+def build_tile_manifest(projects, min_zoom, max_zoom, radius, focus_zoom=10, focus_span=8):
+    """Return unique tiles surrounding every project, including search-focus coverage."""
     manifest = set()
     for zoom in range(min_zoom, max_zoom + 1):
         tile_count = 2 ** zoom
         for project in projects:
             center_x = int(lon_to_tile_x(project["lon"], zoom))
             center_y = int(lat_to_tile_y(project["lat"], zoom))
-            for tile_x in range(center_x - radius, center_x + radius + 1):
-                for tile_y in range(center_y - radius, center_y + radius + 1):
+            if zoom == focus_zoom:
+                left = focus_span // 2
+                right = focus_span - left
+                x_offsets = range(-left, right)
+                y_offsets = range(-left, right)
+            else:
+                x_offsets = range(-radius, radius + 1)
+                y_offsets = range(-radius, radius + 1)
+            for x_offset in x_offsets:
+                for y_offset in y_offsets:
+                    tile_x = center_x + x_offset
+                    tile_y = center_y + y_offset
                     if 0 <= tile_x < tile_count and 0 <= tile_y < tile_count:
                         manifest.add((zoom, tile_x, tile_y))
     return sorted(manifest)
@@ -195,6 +205,18 @@ def main():
         help="Tiles in each direction; radius 3 means a 7x7 area around each point.",
     )
     parser.add_argument(
+        "--focus-zoom",
+        type=int,
+        default=10,
+        help="Zoom level used when the search bar focuses a project.",
+    )
+    parser.add_argument(
+        "--focus-span",
+        type=int,
+        default=8,
+        help="Tile width/height for each search-focused project view.",
+    )
+    parser.add_argument(
         "--processes",
         type=int,
         default=4,
@@ -218,6 +240,10 @@ def main():
         parser.error("zoom levels must satisfy 1 <= min-zoom <= max-zoom <= 19")
     if args.radius < 0:
         parser.error("radius must be zero or greater")
+    if not args.min_zoom <= args.focus_zoom <= args.max_zoom:
+        parser.error("focus-zoom must be within the min/max zoom range")
+    if args.focus_span < 1:
+        parser.error("focus-span must be positive")
     if not 1 <= args.processes <= 8:
         parser.error("processes must be between 1 and 8")
     if not 1 <= args.workers <= 8:
@@ -231,6 +257,8 @@ def main():
         args.min_zoom,
         args.max_zoom,
         args.radius,
+        args.focus_zoom,
+        args.focus_span,
     )
     missing = [tile for tile in manifest if not os.path.isfile(tile_path(tile))]
     print(f"Projects: {len(projects)}")

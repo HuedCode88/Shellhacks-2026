@@ -25,6 +25,7 @@ MAX_DETAIL_ZOOM = 17
 TILE_SIZE = 256
 MAX_TILE_GRID = 8
 FOCUSED_TILE_SPAN = 8
+TELEPORT_ZOOM = 10
 OSM_USER_AGENT = "Shellhacks-2026-3D-map/1.0 (local visualization)"
 TILE_CACHE = {}
 TILE_CACHE_DIR = os.path.join(BASE_DIR, "map_tiles")
@@ -373,7 +374,7 @@ def draw_marker(project, center_x, center_y, quadric, selected=False):
     glEnd()
 
 
-def pick_project(projects, click_position, center_x, center_y):
+def pick_project(projects, click_position, center_x, center_y, show_desc=True, show_ga_its=True):
     """Return the closest marker under a screen-space click."""
     viewport = glGetIntegerv(GL_VIEWPORT)
     window_height = viewport[3]
@@ -383,6 +384,10 @@ def pick_project(projects, click_position, center_x, center_y):
     closest_distance = 18.0
 
     for project in projects:
+        if project["sheet"] == "DESC Geocoded" and not show_desc:
+            continue
+        if project["sheet"] == "GA ITS Geocoded" and not show_ga_its:
+            continue
         x, z = project_position(project, center_x, center_y)
         screen_x, screen_y, depth = gluProject(x, 1.2, z)
         distance = math.hypot(screen_x - click_x, screen_y - click_y)
@@ -417,7 +422,7 @@ def draw_axes(length):
     glEnd()
 
 
-def draw_overlap_lines(overlaps, center_x, center_y, min_x, max_x, min_y, max_y):
+def draw_overlap_lines(overlaps, center_x, center_y, min_x, max_x, min_y, max_y, selected_project=None):
     """Render the 2D mockup's cross-project relationships on the 3D floor."""
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_DEPTH_BUFFER_BIT)
     glDisable(GL_DEPTH_TEST)
@@ -434,8 +439,11 @@ def draw_overlap_lines(overlaps, center_x, center_y, min_x, max_x, min_y, max_y)
             continue
         first_x, first_z = project_position(overlap["first"], center_x, center_y)
         second_x, second_z = project_position(overlap["second"], center_x, center_y)
-        red, green, blue = overlap["color"]
-        glColor4f(red, green, blue, 0.65)
+        is_selected = selected_project in (overlap["first"], overlap["second"])
+        red, green, blue = (1.0, 0.95, 0.15) if is_selected else overlap["color"]
+        glColor4f(red, green, blue, 0.95 if is_selected else 0.65)
+        if is_selected:
+            glLineWidth(7.0)
         glBegin(GL_LINES)
         glVertex3f(first_x, 0.12, first_z)
         glVertex3f(second_x, 0.12, second_z)
@@ -478,6 +486,7 @@ def main(preload=False):
     quadric = gluNewQuadric()
     info_panel = ProjectInfoPanel(window_size)
     info_panel.set_projects(projects)
+    info_panel.set_overlaps(overlaps)
 
     camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
     camera_rotation_x = 52.0
@@ -489,8 +498,38 @@ def main(preload=False):
     last_mouse_pos = (0, 0)
     selected_project = None
     pending_click = None
+    show_desc = True
+    show_ga_its = True
+    show_overlaps = True
     clock = pygame.time.Clock()
     running = True
+
+    def focus_camera_on_project(project):
+        nonlocal map_image, min_x, min_y, max_x, max_y
+        nonlocal center_x, center_y, texture_id, map_zoom
+        nonlocal camera_distance, camera_rotation_x, camera_rotation_y
+        nonlocal camera_offset_x, camera_offset_z
+
+        target_zoom = min(MAX_DETAIL_ZOOM, TELEPORT_ZOOM)
+        map_zoom = target_zoom
+        glDeleteTextures([texture_id])
+        map_image, min_x, min_y, center_x, center_y = download_map_texture(
+            projects,
+            zoom=map_zoom,
+            focus=(project["lat"], project["lon"]),
+        )
+        max_x = min_x + map_image.width // TILE_SIZE - 1
+        max_y = min_y + map_image.height // TILE_SIZE - 1
+        texture_id = make_texture(map_image)
+
+        camera_offset_x, camera_offset_z = project_position(
+            project,
+            center_x,
+            center_y,
+        )
+        camera_rotation_x = 90.0
+        camera_rotation_y = 0.0
+        camera_distance = 110.0
 
     while running:
         for event in pygame.event.get():
@@ -502,24 +541,57 @@ def main(preload=False):
                         info_panel.close_search()
                     else:
                         running = False
-                elif event.key == pygame.K_f and event.mod & pygame.KMOD_CTRL:
-                    info_panel.begin_search()
+                elif event.key == pygame.K_r:
+                    info_panel.toggle_ranking()
+                elif event.key == pygame.K_1:
+                    show_desc = not show_desc
+                    info_panel.set_layers(show_desc, show_ga_its, show_overlaps)
+                elif event.key == pygame.K_2:
+                    show_ga_its = not show_ga_its
+                    info_panel.set_layers(show_desc, show_ga_its, show_overlaps)
+                elif event.key == pygame.K_3:
+                    show_overlaps = not show_overlaps
+                    info_panel.set_layers(show_desc, show_ga_its, show_overlaps)
+                elif event.key == pygame.K_l:
+                    info_panel.toggle_panel()
                 elif info_panel.search_active and event.key == pygame.K_BACKSPACE:
                     info_panel.remove_search_character()
                 elif info_panel.search_active and event.key == pygame.K_RETURN:
                     search_result = info_panel.choose_search_result()
                     if search_result is not None:
                         selected_project = search_result
-                        camera_offset_x, camera_offset_z = project_position(
-                            selected_project,
-                            center_x,
-                            center_y,
-                        )
+                        focus_camera_on_project(selected_project)
                         info_panel.set_project(selected_project)
                         pygame.display.set_caption(describe_project(selected_project))
             elif event.type == pygame.TEXTINPUT and info_panel.search_active:
                 info_panel.append_search_text(event.text)
             elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1 and info_panel.panel_button_hit(event.pos):
+                    info_panel.toggle_panel()
+                    continue
+                search_result, search_handled = info_panel.search_result_at(event.pos)
+                if search_result is not None:
+                    selected_project = search_result
+                    focus_camera_on_project(selected_project)
+                    info_panel.set_project(selected_project)
+                    pygame.display.set_caption(describe_project(selected_project))
+                    continue
+                if search_handled:
+                    continue
+                if event.button == 1:
+                    selected_overlap = info_panel.ranking_result_at(event.pos)
+                    if selected_overlap is not None:
+                        selected_project = selected_overlap["first"]
+                        focus_camera_on_project(selected_project)
+                        info_panel.set_project(selected_project)
+                        pygame.display.set_caption(describe_project(selected_project))
+                        continue
+                if event.button in (4, 5) and info_panel.ranking_active and info_panel.ranking_wheel_hit(event.pos):
+                    info_panel.scroll_ranking(-1 if event.button == 4 else 1)
+                    continue
+                if event.button == 1 and info_panel.ranking_active and info_panel.ranking_button_hit(event.pos):
+                    info_panel.toggle_ranking_minimized()
+                    continue
                 if event.button == 1:
                     mouse_down = True
                     mouse_down_position = event.pos
@@ -576,24 +648,26 @@ def main(preload=False):
                 mouse_down = False
                 if math.dist(event.pos, mouse_down_position) <= 6.0:
                     pending_click = event.pos
-            elif event.type == pygame.MOUSEMOTION and mouse_down:
-                delta_x = event.pos[0] - last_mouse_pos[0]
-                delta_y = event.pos[1] - last_mouse_pos[1]
-                camera_rotation_y += delta_x * 0.5
-                camera_rotation_x = max(15.0, min(85.0, camera_rotation_x + delta_y * 0.5))
-                last_mouse_pos = event.pos
+            elif event.type == pygame.MOUSEMOTION:
+                info_panel.update_pointer(event.pos)
+                if mouse_down and not info_panel.search_active:
+                    delta_x = event.pos[0] - last_mouse_pos[0]
+                    delta_y = event.pos[1] - last_mouse_pos[1]
+                    camera_rotation_y += delta_x * 0.5
+                    camera_rotation_x = max(15.0, min(85.0, camera_rotation_x + delta_y * 0.5))
+                    last_mouse_pos = event.pos
 
         frame_seconds = clock.get_time() / 1000.0
         pressed_keys = pygame.key.get_pressed()
         movement_speed = 42.0 if pressed_keys[pygame.K_LSHIFT] or pressed_keys[pygame.K_RSHIFT] else 18.0
         movement = movement_speed * frame_seconds
-        if pressed_keys[pygame.K_w]:
+        if not info_panel.search_active and pressed_keys[pygame.K_w]:
             camera_offset_z -= movement
-        if pressed_keys[pygame.K_s]:
+        if not info_panel.search_active and pressed_keys[pygame.K_s]:
             camera_offset_z += movement
-        if pressed_keys[pygame.K_a]:
+        if not info_panel.search_active and pressed_keys[pygame.K_a]:
             camera_offset_x -= movement
-        if pressed_keys[pygame.K_d]:
+        if not info_panel.search_active and pressed_keys[pygame.K_d]:
             camera_offset_x += movement
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
@@ -608,6 +682,8 @@ def main(preload=False):
                 pending_click,
                 center_x,
                 center_y,
+                show_desc,
+                show_ga_its,
             )
             pending_click = None
             info_panel.set_project(selected_project)
@@ -620,19 +696,28 @@ def main(preload=False):
                 print(f"Selected: {project_info}")
                 pygame.display.set_caption(project_info)
         draw_floor(texture_id, map_image, min_x, min_y, center_x, center_y)
-        rendered_overlap_lines = draw_overlap_lines(
-            overlaps,
-            center_x,
-            center_y,
-            min_x,
-            max_x,
-            min_y,
-            max_y,
+        rendered_overlap_lines = (
+            draw_overlap_lines(
+                overlaps,
+                center_x,
+                center_y,
+                min_x,
+                max_x,
+                min_y,
+                max_y,
+                selected_project,
+            )
+            if show_overlaps
+            else 0
         )
         info_panel.set_overlap_status(len(overlaps), rendered_overlap_lines)
         draw_axes(12.0)
         for project in projects:
             if not project_is_visible(project, min_x, max_x, min_y, max_y):
+                continue
+            if project["sheet"] == "DESC Geocoded" and not show_desc:
+                continue
+            if project["sheet"] == "GA ITS Geocoded" and not show_ga_its:
                 continue
             draw_marker(
                 project,
