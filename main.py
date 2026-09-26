@@ -16,7 +16,7 @@ from build_overlap_table import (
 
 EXCEL_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "gridlock_project_tables_geocoded_with_descriptions.xlsx"
+    "gridlock_project_tables_geocoded_with_descriptions(1).xlsx"
 )
 
 OUTPUT_HTML = os.path.join(
@@ -36,15 +36,16 @@ SHEET_CATEGORY_FIELD = {
 
 
 CATEGORY_COLORS = {
-    ("DESC Geocoded", "In Progress"): "green",
-    ("DESC Geocoded", "Planned"): "orange",
+    ("DESC Geocoded", "In Progress"): "#28a745",
+    ("DESC Geocoded", "Planned"): "#fd7e14",
 
-    ("GA ITS Geocoded", "GPC"): "blue",
-    ("GA ITS Geocoded", "GTC"): "purple",
-    ("GA ITS Geocoded", "SAV"): "pink",
-    ("GA ITS Geocoded", "MEAG"): "cadetblue",
-    ("GA ITS Geocoded", "DU"): "darkred",
+    ("GA ITS Geocoded", "GPC"): "#007bff",
+    ("GA ITS Geocoded", "GTC"): "#6f42c1",
+    ("GA ITS Geocoded", "SAV"): "#e83e8c",
+    ("GA ITS Geocoded", "MEAG"): "#17a2b8",
+    ("GA ITS Geocoded", "DU"): "#8b0000",
 }
+
 
 
 DEFAULT_COLOR = "gray"
@@ -85,17 +86,18 @@ POPUP_FIELDS = {
 OVERLAP_COLORS = {
 
     "Touching / Crossing -- must coordinate (outage timing, crossing structures)":
-        "red",
+        "#00FFFF",
 
     "Under 1.6 km -- can share the right-of-way (access roads, permits)":
-        "orange",
+        "#00FFFF",
 
     "Under 8 km -- can share site logistics (laydown yards, deliveries)":
-        "purple",
+        "#00FFFF",
 
     "Under 40 km -- can share crews & equipment":
-        "blue",
+        "#00FFFF",
 }
+
 
 
 # ============================================================
@@ -487,11 +489,27 @@ def add_overlap_lines(
                 end
             ],
 
-            color=color,
+            color="#111111",
 
             weight=5,
 
-            opacity=0.8,
+            opacity=0.9,
+
+        ).add_to(overlap_layer)
+
+
+        folium.PolyLine(
+
+            locations=[
+                start,
+                end
+            ],
+
+            color="#00FFFF",
+
+            weight=3,
+
+            opacity=1.0,
 
             tooltip=(
                 f"{desc_name} ↔ "
@@ -504,9 +522,8 @@ def add_overlap_lines(
                 max_width=400
             ),
 
-        ).add_to(
-            overlap_layer
-        )
+        ).add_to(overlap_layer)
+
 
         overlap_count += 1
 
@@ -1093,6 +1110,798 @@ def add_overlap_ranking_panel(
         Element(panel_html)
     )
 
+def add_map_legend(fmap):
+    """
+    Adds a collapsible legend to the left side of the map.
+
+    Closed:
+        The legend is hidden off-screen and only the > tab is visible.
+
+    Open:
+        The legend slides out and the arrow changes to <.
+    """
+
+    from branca.element import Element
+
+    legend_html = """
+    <style>
+        #map-legend-container {
+            position: fixed;
+            bottom: 20px;
+            left: 0;
+            z-index: 9999;
+            font-family: Arial, sans-serif;
+        }
+
+        #map-legend-panel {
+            position: relative;
+
+            width: 220px;
+
+            background: white;
+
+            border: 2px solid #333;
+            border-left: none;
+
+            border-radius: 0 8px 8px 0;
+
+            padding: 14px 16px;
+
+            box-shadow:
+                0 3px 12px rgba(0,0,0,0.3);
+
+            transition:
+                transform 0.3s ease;
+        }
+
+        #map-legend-container.legend-hidden
+        #map-legend-panel {
+            transform: translateX(-220px);
+        }
+
+        #map-legend-toggle {
+            position: absolute;
+
+            right: -38px;
+            top: 50%;
+
+            transform: translateY(-50%);
+
+            width: 38px;
+            height: 70px;
+
+            border: 2px solid #333;
+            border-left: none;
+
+            border-radius: 0 8px 8px 0;
+
+            background: white;
+
+            cursor: pointer;
+
+            font-size: 22px;
+            font-weight: bold;
+
+            box-shadow:
+                3px 0 8px rgba(0,0,0,0.2);
+        }
+
+        #map-legend-toggle:hover {
+            background: #f0f0f0;
+        }
+
+        .legend-title {
+            font-size: 15px;
+            font-weight: bold;
+            margin-bottom: 10px;
+        }
+
+        .legend-section {
+            font-weight: bold;
+            margin-top: 8px;
+            margin-bottom: 5px;
+        }
+
+        .legend-item {
+            display: flex;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+
+        .legend-color {
+            width: 14px;
+            height: 14px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+            flex-shrink: 0;
+        }
+    </style>
+
+    <div
+        id="map-legend-container"
+        class="legend-hidden"
+    >
+
+        <div id="map-legend-panel">
+
+            <button
+                id="map-legend-toggle"
+                onclick="toggleMapLegend()"
+                title="Show legend"
+            >❯</button>
+
+            <div class="legend-title">
+                Project Legend
+            </div>
+
+            <div class="legend-section">
+                DESC
+            </div>
+
+            <div class="legend-item">
+                <span
+                    class="legend-color"
+                    style="background: green;"
+                ></span>
+                In Progress
+            </div>
+
+            <div class="legend-item">
+                <span
+                    class="legend-color"
+                    style="background: orange;"
+                ></span>
+                Planned
+            </div>
+
+            <div class="legend-section">
+                GA ITS
+            </div>
+
+            <div class="legend-item">
+                <span
+                    class="legend-color"
+                    style="background: blue;"
+                ></span>
+                GPC
+            </div>
+
+            <div class="legend-item">
+                <span
+                    class="legend-color"
+                    style="background: purple;"
+                ></span>
+                GTC
+            </div>
+
+            <div class="legend-item">
+                <span
+                    class="legend-color"
+                    style="background: pink;"
+                ></span>
+                SAV
+            </div>
+
+            <div class="legend-item">
+                <span
+                    class="legend-color"
+                    style="background: cadetblue;"
+                ></span>
+                MEAG
+            </div>
+
+            <div class="legend-item">
+                <span
+                    class="legend-color"
+                    style="background: darkred;"
+                ></span>
+                DU
+            </div>
+
+            <div style="
+                border-top: 1px solid #ccc;
+                margin-top: 10px;
+                padding-top: 10px;
+            ">
+
+                <div class="legend-section">
+                    Connections
+                </div>
+
+                <div class="legend-item">
+
+                    <span style="
+                        width: 24px;
+                        height: 3px;
+                        background: #00FFFF;
+                        display: inline-block;
+                        margin-right: 8px;
+                        flex-shrink: 0;
+                    "></span>
+
+                    Project Overlap
+
+                </div>
+
+            </div>
+
+        </div>
+
+    </div>
+
+    <script>
+        function toggleMapLegend() {
+
+            var container =
+                document.getElementById(
+                    "map-legend-container"
+                );
+
+            var button =
+                document.getElementById(
+                    "map-legend-toggle"
+                );
+
+            if (
+                container.classList.contains(
+                    "legend-hidden"
+                )
+            ) {
+
+                container.classList.remove(
+                    "legend-hidden"
+                );
+
+                button.innerHTML = "❮";
+
+                button.title =
+                    "Hide legend";
+
+            } else {
+
+                container.classList.add(
+                    "legend-hidden"
+                );
+
+                button.innerHTML = "❯";
+
+                button.title =
+                    "Show legend";
+            }
+        }
+    </script>
+    """
+
+    # IMPORTANT:
+    # Jinja interprets {{ }} as template expressions.
+    # Escape them before giving the HTML to Branca.
+    legend_html = legend_html.replace(
+        "{{",
+        "{% raw %}{{{% endraw %}"
+    ).replace(
+        "}}",
+        "{% raw %}}}{% endraw %}"
+    )
+
+    fmap.get_root().html.add_child(
+        Element(legend_html)
+    )
+
+
+def add_project_search(fmap, projects):
+    """
+    Adds a project search bar to the top-right of the map.
+
+    Searches:
+        - Project ID
+        - Project name
+        - Sheet / utility
+        - Category
+
+    Clicking a result zooms the map to that project.
+    """
+
+    from branca.element import Element
+    import json
+    import html
+
+    search_projects = []
+
+    for project in projects:
+
+        search_projects.append({
+            "id": str(project["id"])
+            if project["id"] is not None
+            else "",
+
+            "name": str(project["name"])
+            if project["name"] is not None
+            else "",
+
+            "sheet": str(project["sheet"])
+            if project["sheet"] is not None
+            else "",
+
+            "category": str(project["category"])
+            if project["category"] is not None
+            else "",
+
+            "lat": project["lat"],
+            "lon": project["lon"],
+        })
+
+    projects_json = json.dumps(
+        search_projects
+    )
+
+    search_html = f"""
+    <style>
+
+        #project-search-container {{
+            position: fixed;
+
+            top: 20px;
+            left: 50%;
+
+            transform: translateX(-50%);
+
+            z-index: 9999;
+
+            font-family: Arial, sans-serif;
+
+            width: 330px;
+        }}
+
+
+        #project-search-box {{
+            display: flex;
+
+            background: white;
+
+            border-radius: 7px;
+
+            box-shadow:
+                0 3px 12px
+                rgba(0,0,0,0.3);
+
+            overflow: hidden;
+        }}
+
+
+        #project-search-input {{
+            flex: 1;
+
+            border: none;
+
+            padding: 11px 12px;
+
+            font-size: 14px;
+
+            outline: none;
+
+            min-width: 0;
+        }}
+
+
+        #project-search-button {{
+            border: none;
+
+            background: #222;
+
+            color: white;
+
+            padding: 0 14px;
+
+            cursor: pointer;
+
+            font-size: 16px;
+        }}
+
+
+        #project-search-button:hover {{
+            background: #444;
+        }}
+
+
+        #project-search-results {{
+            display: none;
+
+            margin-top: 6px;
+
+            background: white;
+
+            border-radius: 7px;
+
+            box-shadow:
+                0 3px 12px
+                rgba(0,0,0,0.3);
+
+            max-height: 400px;
+
+            overflow-y: auto;
+        }}
+
+
+        .project-search-result {{
+            padding: 10px 12px;
+
+            border-bottom:
+                1px solid #ddd;
+
+            cursor: pointer;
+
+            font-size: 13px;
+        }}
+
+
+        .project-search-result:hover {{
+            background: #f0f0f0;
+        }}
+
+
+        .project-search-id {{
+            font-weight: bold;
+
+            font-size: 14px;
+
+            margin-bottom: 3px;
+        }}
+
+
+        .project-search-name {{
+            color: #444;
+
+            line-height: 1.3;
+        }}
+
+
+        .project-search-meta {{
+            color: #777;
+
+            font-size: 11px;
+
+            margin-top: 4px;
+        }}
+
+
+        .project-search-no-results {{
+            padding: 12px;
+
+            color: #666;
+
+            font-size: 13px;
+        }}
+
+    </style>
+
+
+    <div id="project-search-container">
+
+        <div id="project-search-box">
+
+            <input
+                id="project-search-input"
+                type="text"
+                placeholder="Search projects..."
+                autocomplete="off"
+            >
+
+            <button
+                id="project-search-button"
+                onclick="searchProjects()"
+                title="Search"
+            >
+                🔍
+            </button>
+
+        </div>
+
+
+        <div id="project-search-results"></div>
+
+    </div>
+
+
+    <script>
+
+        var projectSearchData =
+            {projects_json};
+
+
+        function searchProjects() {{
+
+            var input =
+                document.getElementById(
+                    "project-search-input"
+                );
+
+            var results =
+                document.getElementById(
+                    "project-search-results"
+                );
+
+
+            var query =
+                input.value
+                    .trim()
+                    .toLowerCase();
+
+
+            if (!query) {{
+
+                results.style.display = "none";
+
+                results.innerHTML = "";
+
+                return;
+
+            }}
+
+
+            /*
+             * Search ID, name, utility,
+             * and category.
+             */
+
+            var matches =
+                projectSearchData.filter(
+                    function(project) {{
+
+                        var searchable =
+                            (
+                                project.id +
+                                " " +
+                                project.name +
+                                " " +
+                                project.sheet +
+                                " " +
+                                project.category
+                            ).toLowerCase();
+
+                        return searchable.includes(
+                            query
+                        );
+
+                    }}
+                );
+
+
+            /*
+             * Limit displayed results.
+             */
+
+            matches =
+                matches.slice(0, 15);
+
+
+            if (matches.length === 0) {{
+
+                results.innerHTML =
+                    '<div class="project-search-no-results">' +
+                    'No matching projects found.' +
+                    '</div>';
+
+                results.style.display =
+                    "block";
+
+                return;
+
+            }}
+
+
+            /*
+             * Build result list.
+             */
+
+            var html = "";
+
+
+            matches.forEach(
+                function(project) {{
+
+                    var safeId =
+                        escapeSearchHtml(
+                            project.id
+                        );
+
+                    var safeName =
+                        escapeSearchHtml(
+                            project.name
+                        );
+
+                    var safeSheet =
+                        escapeSearchHtml(
+                            project.sheet
+                        );
+
+                    var safeCategory =
+                        escapeSearchHtml(
+                            project.category
+                        );
+
+
+                    html +=
+                        '<div ' +
+                        'class="project-search-result" ' +
+                        'onclick="focusProject(' +
+                        project.lat + ',' +
+                        project.lon +
+                        ')">' +
+
+                            '<div class="project-search-id">' +
+                                safeId +
+                            '</div>' +
+
+                            '<div class="project-search-name">' +
+                                safeName +
+                            '</div>' +
+
+                            '<div class="project-search-meta">' +
+                                safeSheet +
+                                (
+                                    safeCategory
+                                    ? " • " + safeCategory
+                                    : ""
+                                ) +
+                            '</div>' +
+
+                        '</div>';
+
+                }}
+            );
+
+
+            results.innerHTML =
+                html;
+
+            results.style.display =
+                "block";
+
+        }}
+
+
+        function focusProject(
+            lat,
+            lon
+        ) {{
+
+            /*
+             * Find Folium's Leaflet map.
+             */
+
+            var mapObject = null;
+
+
+            for (
+                var key in window
+            ) {{
+
+                if (
+                    key.startsWith("map_") &&
+                    window[key] &&
+                    typeof window[key].setView
+                        === "function"
+                ) {{
+
+                    mapObject =
+                        window[key];
+
+                    break;
+
+                }}
+
+            }}
+
+
+            if (!mapObject) {{
+
+                console.error(
+                    "Could not find Leaflet map."
+                );
+
+                return;
+
+            }}
+
+
+            /*
+             * Zoom to project.
+             */
+
+            mapObject.setView(
+                [lat, lon],
+                13
+            );
+
+
+            /*
+             * Close results.
+             */
+
+            document.getElementById(
+                "project-search-results"
+            ).style.display =
+                "none";
+
+
+            /*
+             * Clear search box.
+             */
+
+            document.getElementById(
+                "project-search-input"
+            ).value = "";
+
+        }}
+
+
+        function escapeSearchHtml(
+            value
+        ) {{
+
+            return String(value)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+
+        }}
+
+
+        /*
+         * Pressing Enter searches.
+         */
+
+        document
+            .getElementById(
+                "project-search-input"
+            )
+            .addEventListener(
+                "keydown",
+                function(event) {{
+
+                    if (
+                        event.key === "Enter"
+                    ) {{
+
+                        searchProjects();
+
+                    }}
+
+                }}
+            );
+
+
+        /*
+         * Search while typing.
+         *
+         * This makes it feel more like
+         * an autocomplete box.
+         */
+
+        document
+            .getElementById(
+                "project-search-input"
+            )
+            .addEventListener(
+                "input",
+                function() {{
+
+                    searchProjects();
+
+                }}
+            );
+
+    </script>
+    """
+
+    fmap.get_root().html.add_child(
+        Element(search_html)
+    )
+
+
 
 # ============================================================
 # BUILD MAP
@@ -1142,6 +1951,12 @@ def build_map(
         tiles="OpenStreetMap",
     )
 
+    add_project_search(
+        fmap,
+        projects
+    )
+
+
     # --------------------------------------------------------
     # Project layers
     # --------------------------------------------------------
@@ -1187,12 +2002,24 @@ def build_map(
             )
         )
 
-        folium.Marker(
+        folium.CircleMarker(
 
             location=[
                 project["lat"],
                 project["lon"]
             ],
+
+            radius=7,
+
+            color="#333333",
+
+            weight=1,
+
+            fill=True,
+
+            fill_color=project["color"],
+
+            fill_opacity=0.9,
 
             tooltip=" ".join(
                 title_bits
@@ -1203,13 +2030,10 @@ def build_map(
                 max_width=350
             ),
 
-            icon=folium.Icon(
-                color=project["color"]
-            ),
-
         ).add_to(
             layers[sheet]
         )
+
 
     # --------------------------------------------------------
     # OVERLAPS
@@ -1243,6 +2067,9 @@ def build_map(
     ).add_to(
         fmap
     )
+
+    add_map_legend(fmap)
+
 
     # --------------------------------------------------------
     # Save
