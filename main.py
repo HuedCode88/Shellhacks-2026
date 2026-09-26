@@ -2,6 +2,7 @@
 
 import math
 import os
+import argparse
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
@@ -11,7 +12,7 @@ import requests
 from OpenGL.GL import *
 from OpenGL.GLU import *
 from PIL import Image
-from pygame.locals import DOUBLEBUF, OPENGL
+from pygame.locals import DOUBLEBUF, FULLSCREEN, OPENGL
 from overlap_logic import build_project_overlaps
 from project_ui import ProjectInfoPanel
 
@@ -20,10 +21,13 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 EXCEL_FILE = os.path.join(BASE_DIR, "gridlock_project_tables_geocoded_nominatim.xlsx")
 WINDOW_SIZE = (1200, 800)
 TILE_ZOOM = 8
+MAX_DETAIL_ZOOM = 17
 TILE_SIZE = 256
 MAX_TILE_GRID = 8
+FOCUSED_TILE_SPAN = 8
 OSM_USER_AGENT = "Shellhacks-2026-3D-map/1.0 (local visualization)"
 TILE_CACHE = {}
+TILE_CACHE_DIR = os.path.join(BASE_DIR, "map_tiles")
 
 SHEET_CATEGORY_FIELD = {
     "DESC Geocoded": "Status",
@@ -174,7 +178,7 @@ def download_map_texture(projects, zoom=None, focus=None):
         min_y = max(0, math.floor(lat_to_tile_y(max_lat, TILE_ZOOM)) - 1)
         max_y = min(tile_count - 1, math.floor(lat_to_tile_y(min_lat, TILE_ZOOM)) + 1)
     else:
-        tile_span = 6
+        tile_span = FOCUSED_TILE_SPAN
         focus_tile_x = math.floor(center_x)
         focus_tile_y = math.floor(center_y)
         min_x = max(0, focus_tile_x - tile_span // 2)
@@ -196,6 +200,20 @@ def download_map_texture(projects, zoom=None, focus=None):
         if cache_key in TILE_CACHE:
             return tile_coordinates, TILE_CACHE[cache_key]
 
+        tile_path = os.path.join(
+            TILE_CACHE_DIR,
+            str(TILE_ZOOM),
+            str(tile_x),
+            f"{tile_y}.png",
+        )
+        try:
+            with open(tile_path, "rb") as tile_file:
+                tile = Image.open(tile_file).convert("RGB")
+                TILE_CACHE[cache_key] = tile
+                return tile_coordinates, tile
+        except (FileNotFoundError, OSError):
+            pass
+
         url = f"https://tile.openstreetmap.org/{TILE_ZOOM}/{tile_x}/{tile_y}.png"
         try:
             response = requests.get(
@@ -204,6 +222,9 @@ def download_map_texture(projects, zoom=None, focus=None):
                 timeout=15,
             )
             response.raise_for_status()
+            os.makedirs(os.path.dirname(tile_path), exist_ok=True)
+            with open(tile_path, "wb") as tile_file:
+                tile_file.write(response.content)
             tile = Image.open(BytesIO(response.content)).convert("RGB")
             TILE_CACHE[cache_key] = tile
             return tile_coordinates, tile
@@ -227,11 +248,28 @@ def download_map_texture(projects, zoom=None, focus=None):
     return texture_image, min_x, min_y, center_x, center_y
 
 
+def preload_map(projects):
+    """Persist the base view and detail zoom levels before opening the viewer."""
+    base_zoom = choose_tile_zoom(projects)
+    print(f"Preloading map tiles into {TILE_CACHE_DIR}...")
+    download_map_texture(projects, zoom=base_zoom)
+    min_lat = min(project["lat"] for project in projects)
+    max_lat = max(project["lat"] for project in projects)
+    min_lon = min(project["lon"] for project in projects)
+    max_lon = max(project["lon"] for project in projects)
+    focus = ((min_lat + max_lat) / 2.0, (min_lon + max_lon) / 2.0)
+    for zoom in range(base_zoom + 1, MAX_DETAIL_ZOOM + 1):
+        download_map_texture(projects, zoom=zoom, focus=focus)
+    print("Map preload complete. Future launches will use the local tile cache.")
+
+
 def make_texture(image):
     texture_id = glGenTextures(1)
     glBindTexture(GL_TEXTURE_2D, texture_id)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
     glTexImage2D(
         GL_TEXTURE_2D,
         0,
@@ -285,6 +323,32 @@ def project_position(project, center_x, center_y):
         (lon_to_tile_x(project["lon"], TILE_ZOOM) - center_x) * 40.0,
         (lat_to_tile_y(project["lat"], TILE_ZOOM) - center_y) * 40.0,
     )
+
+
+def project_is_visible(project, min_x, max_x, min_y, max_y):
+    project_x = lon_to_tile_x(project["lon"], TILE_ZOOM)
+    project_y = lat_to_tile_y(project["lat"], TILE_ZOOM)
+    return min_x <= project_x <= max_x + 1 and min_y <= project_y <= max_y + 1
+
+
+def map_point_under_mouse(mouse_position, center_x, center_y):
+    """Return map-local coordinates and geographic coordinates under the cursor."""
+    viewport = glGetIntegerv(GL_VIEWPORT)
+    mouse_x, mouse_y = mouse_position
+    mouse_y = viewport[3] - mouse_y
+    modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
+    projection = glGetDoublev(GL_PROJECTION_MATRIX)
+    near_point = gluUnProject(mouse_x, mouse_y, 0.0, modelview, projection, viewport)
+    far_point = gluUnProject(mouse_x, mouse_y, 1.0, modelview, projection, viewport)
+    ray_y = far_point[1] - near_point[1]
+    if abs(ray_y) < 1e-9:
+        return None
+    fraction = -near_point[1] / ray_y
+    map_x = near_point[0] + fraction * (far_point[0] - near_point[0])
+    map_z = near_point[2] + fraction * (far_point[2] - near_point[2])
+    tile_x = center_x + map_x / 40.0
+    tile_y = center_y + map_z / 40.0
+    return map_x, map_z, tile_y_to_lat(tile_y, TILE_ZOOM), tile_x_to_lon(tile_x, TILE_ZOOM)
 
 
 def draw_marker(project, center_x, center_y, quadric, selected=False):
@@ -346,7 +410,7 @@ def draw_axes(length):
     glEnd()
 
 
-def draw_overlap_lines(overlaps, center_x, center_y):
+def draw_overlap_lines(overlaps, center_x, center_y, min_x, max_x, min_y, max_y):
     """Render the 2D mockup's cross-project relationships on the 3D floor."""
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_DEPTH_BUFFER_BIT)
     glDisable(GL_DEPTH_TEST)
@@ -354,7 +418,13 @@ def draw_overlap_lines(overlaps, center_x, center_y):
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glLineWidth(4.0)
+    rendered_lines = 0
     for overlap in overlaps:
+        if not (
+            project_is_visible(overlap["first"], min_x, max_x, min_y, max_y)
+            and project_is_visible(overlap["second"], min_x, max_x, min_y, max_y)
+        ):
+            continue
         first_x, first_z = project_position(overlap["first"], center_x, center_y)
         second_x, second_z = project_position(overlap["second"], center_x, center_y)
         red, green, blue = overlap["color"]
@@ -363,12 +433,17 @@ def draw_overlap_lines(overlaps, center_x, center_y):
         glVertex3f(first_x, 0.12, first_z)
         glVertex3f(second_x, 0.12, second_z)
         glEnd()
+        rendered_lines += 1
     glPopAttrib()
-    return len(overlaps)
+    return rendered_lines
 
 
-def main():
+def main(preload=False):
     projects = load_projects(EXCEL_FILE)
+    if preload:
+        preload_map(projects)
+        return
+
     overlaps = [
         overlap
         for project in projects
@@ -384,14 +459,17 @@ def main():
         projects,
         zoom=map_zoom,
     )
+    max_x = min_x + map_image.width // TILE_SIZE - 1
+    max_y = min_y + map_image.height // TILE_SIZE - 1
 
     pygame.init()
-    pygame.display.set_mode(WINDOW_SIZE, DOUBLEBUF | OPENGL)
+    pygame.display.set_mode((0, 0), DOUBLEBUF | FULLSCREEN | OPENGL)
+    window_size = pygame.display.get_window_size()
     pygame.display.set_caption("3D Gridlock Project Map | © OpenStreetMap contributors")
-    setup_opengl(*WINDOW_SIZE)
+    setup_opengl(*window_size)
     texture_id = make_texture(map_image)
     quadric = gluNewQuadric()
-    info_panel = ProjectInfoPanel(WINDOW_SIZE)
+    info_panel = ProjectInfoPanel(window_size)
 
     camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
     camera_rotation_x = 52.0
@@ -410,22 +488,24 @@ def main():
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
+            elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                running = False
             elif event.type == pygame.MOUSEBUTTONDOWN:
                 if event.button == 1:
                     mouse_down = True
                     mouse_down_position = event.pos
                     last_mouse_pos = event.pos
                 elif event.button == 4:
-                    new_zoom = min(8, map_zoom + 1)
+                    new_zoom = min(MAX_DETAIL_ZOOM, map_zoom + 1)
                     if new_zoom != map_zoom:
-                        focus_lon = tile_x_to_lon(
-                            center_x + camera_offset_x / 40.0,
-                            map_zoom,
+                        mouse_focus = map_point_under_mouse(
+                            event.pos,
+                            center_x,
+                            center_y,
                         )
-                        focus_lat = tile_y_to_lat(
-                            center_y + camera_offset_z / 40.0,
-                            map_zoom,
-                        )
+                        if mouse_focus is None:
+                            mouse_focus = (0.0, 0.0, tile_y_to_lat(center_y, map_zoom), tile_x_to_lon(center_x, map_zoom))
+                        old_map_x, old_map_z, focus_lat, focus_lon = mouse_focus
                         map_zoom = new_zoom
                         glDeleteTextures([texture_id])
                         map_image, min_x, min_y, center_x, center_y = download_map_texture(
@@ -433,21 +513,23 @@ def main():
                             zoom=map_zoom,
                             focus=(focus_lat, focus_lon),
                         )
+                        max_x = min_x + map_image.width // TILE_SIZE - 1
+                        max_y = min_y + map_image.height // TILE_SIZE - 1
                         texture_id = make_texture(map_image)
-                        camera_offset_x = 0.0
-                        camera_offset_z = 0.0
+                        camera_offset_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * 40.0 - old_map_x
+                        camera_offset_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * 40.0 - old_map_z
                         camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
                 elif event.button == 5:
                     new_zoom = max(2, map_zoom - 1)
                     if new_zoom != map_zoom:
-                        focus_lon = tile_x_to_lon(
-                            center_x + camera_offset_x / 40.0,
-                            map_zoom,
+                        mouse_focus = map_point_under_mouse(
+                            event.pos,
+                            center_x,
+                            center_y,
                         )
-                        focus_lat = tile_y_to_lat(
-                            center_y + camera_offset_z / 40.0,
-                            map_zoom,
-                        )
+                        if mouse_focus is None:
+                            mouse_focus = (0.0, 0.0, tile_y_to_lat(center_y, map_zoom), tile_x_to_lon(center_x, map_zoom))
+                        old_map_x, old_map_z, focus_lat, focus_lon = mouse_focus
                         map_zoom = new_zoom
                         glDeleteTextures([texture_id])
                         map_image, min_x, min_y, center_x, center_y = download_map_texture(
@@ -455,9 +537,11 @@ def main():
                             zoom=map_zoom,
                             focus=(focus_lat, focus_lon),
                         )
+                        max_x = min_x + map_image.width // TILE_SIZE - 1
+                        max_y = min_y + map_image.height // TILE_SIZE - 1
                         texture_id = make_texture(map_image)
-                        camera_offset_x = 0.0
-                        camera_offset_z = 0.0
+                        camera_offset_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * 40.0 - old_map_x
+                        camera_offset_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * 40.0 - old_map_z
                         camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 mouse_down = False
@@ -507,10 +591,20 @@ def main():
                 print(f"Selected: {project_info}")
                 pygame.display.set_caption(project_info)
         draw_floor(texture_id, map_image, min_x, min_y, center_x, center_y)
-        rendered_overlap_lines = draw_overlap_lines(overlaps, center_x, center_y)
+        rendered_overlap_lines = draw_overlap_lines(
+            overlaps,
+            center_x,
+            center_y,
+            min_x,
+            max_x,
+            min_y,
+            max_y,
+        )
         info_panel.set_overlap_status(len(overlaps), rendered_overlap_lines)
         draw_axes(12.0)
         for project in projects:
+            if not project_is_visible(project, min_x, max_x, min_y, max_y):
+                continue
             draw_marker(
                 project,
                 center_x,
@@ -529,4 +623,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser(description="Run the 3D project map viewer.")
+    parser.add_argument(
+        "--preload-map",
+        action="store_true",
+        help="Download and save the map tiles used by all zoom levels, then exit.",
+    )
+    main(preload=parser.parse_args().preload_map)
