@@ -30,7 +30,7 @@ from dateutil import parser as dateparser
 
 SOURCE_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "gridlock_project_tables_geocoded_nominatim(1).xlsx"
+    "gridlock_project_tables_geocoded_with_descriptions.xlsx"
 )
 
 OUTPUT_XLSX = os.path.join(
