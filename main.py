@@ -518,6 +518,581 @@ def add_overlap_lines(
         f"Added {overlap_count} overlap lines to map."
     )
 
+# ============================================================
+# BUILD POPUP
+# ============================================================
+def add_overlap_ranking_panel(
+    fmap,
+    overlaps,
+    project_lookup
+):
+    """
+    Adds a collapsible overlap-ranking button to the map.
+
+    Clicking an overlap entry:
+      - zooms the map to both projects
+      - highlights the two projects
+      - draws attention to the selected pair
+    """
+
+    if not overlaps:
+        return
+
+    from branca.element import Element
+
+    # --------------------------------------------------------
+    # Build table rows
+    # --------------------------------------------------------
+
+    rows_html = ""
+
+    for rank, overlap in enumerate(
+        overlaps,
+        start=1
+    ):
+
+        desc_id = overlap["desc_id"]
+        gpc_id = overlap["gpc_id"]
+
+        desc_name = (
+            overlap["desc_name"]
+            or "Unknown DESC Project"
+        )
+
+        gpc_name = (
+            overlap["gpc_name"]
+            or "Unknown GPC Project"
+        )
+
+        distance_km = overlap[
+            "distance_km"
+        ]
+
+        distance_mi = overlap[
+            "distance_mi"
+        ]
+
+        day_gap = overlap[
+            "day_gap"
+        ]
+
+        if day_gap is None:
+            time_text = "Unknown"
+        else:
+            time_text = f"{day_gap} days"
+
+        tier = overlap[
+            "geographic_tier"
+        ]
+
+        # ----------------------------------------------------
+        # Color by geographic tier
+        # ----------------------------------------------------
+
+        if tier.startswith(
+            "Touching"
+        ):
+
+            color = "#dc3545"
+
+        elif tier.startswith(
+            "Under 1.6"
+        ):
+
+            color = "#fd7e14"
+
+        elif tier.startswith(
+            "Under 8"
+        ):
+
+            color = "#6f42c1"
+
+        else:
+
+            color = "#0d6efd"
+
+        # ----------------------------------------------------
+        # Find the projects
+        # ----------------------------------------------------
+
+        desc_key = (
+            "DESC Geocoded",
+            str(desc_id).strip()
+        )
+
+        gpc_key = (
+            "GA ITS Geocoded",
+            str(gpc_id).strip()
+        )
+
+        desc_project = project_lookup.get(
+            desc_key
+        )
+
+        gpc_project = project_lookup.get(
+            gpc_key
+        )
+
+        if (
+            desc_project is None
+            or gpc_project is None
+        ):
+            continue
+
+        # ----------------------------------------------------
+        # JavaScript coordinates
+        # ----------------------------------------------------
+
+        desc_lat = desc_project["lat"]
+        desc_lon = desc_project["lon"]
+
+        gpc_lat = gpc_project["lat"]
+        gpc_lon = gpc_project["lon"]
+
+        # ----------------------------------------------------
+        # Row
+        # ----------------------------------------------------
+
+        rows_html += f"""
+
+        <div
+            class="overlap-row"
+            onclick="
+                focusOverlap(
+                    {desc_lat},
+                    {desc_lon},
+                    {gpc_lat},
+                    {gpc_lon},
+                    {rank}
+                );
+            "
+            style="
+                border-bottom: 1px solid #ddd;
+                padding: 10px 8px;
+                cursor: pointer;
+                transition: background 0.15s;
+            "
+            onmouseover="
+                this.style.background='#f0f0f0';
+            "
+            onmouseout="
+                this.style.background='white';
+            "
+        >
+
+            <div style="
+                display: flex;
+                align-items: center;
+                margin-bottom: 5px;
+            ">
+
+                <span style="
+                    background: {color};
+                    color: white;
+
+                    border-radius: 50%;
+
+                    width: 25px;
+                    height: 25px;
+
+                    display: inline-flex;
+
+                    align-items: center;
+                    justify-content: center;
+
+                    font-weight: bold;
+
+                    margin-right: 8px;
+                ">
+                    {rank}
+                </span>
+
+                <strong>
+                    {desc_id} ↔ {gpc_id}
+                </strong>
+
+            </div>
+
+            <div style="
+                font-size: 12px;
+                color: #444;
+                margin-left: 33px;
+            ">
+
+                <div>
+                    <b>DESC:</b>
+                    {desc_name}
+                </div>
+
+                <div>
+                    <b>GPC:</b>
+                    {gpc_name}
+                </div>
+
+                <div style="
+                    margin-top: 5px;
+                    color: #222;
+                ">
+
+                    <b>Distance:</b>
+                    {distance_km:.2f} km
+                    ({distance_mi:.2f} mi)
+
+                    &nbsp; | &nbsp;
+
+                    <b>Time:</b>
+                    {time_text}
+
+                </div>
+
+                <div style="
+                    margin-top: 3px;
+                    color: {color};
+                    font-weight: bold;
+                ">
+
+                    {tier}
+
+                </div>
+
+            </div>
+
+        </div>
+
+        """
+
+    # --------------------------------------------------------
+    # Complete panel
+    # --------------------------------------------------------
+
+    panel_html = f"""
+
+    <!-- OVERLAP BUTTON -->
+
+    <div id="overlap-container"
+        style="
+            position: fixed;
+
+            bottom: 20px;
+            right: 20px;
+
+            z-index: 9999;
+
+            font-family: Arial, sans-serif;
+        "
+    >
+
+        <!-- COLLAPSED BUTTON -->
+
+        <button
+            id="overlap-toggle"
+            onclick="toggleOverlapPanel()"
+            style="
+                background: #222;
+                color: white;
+
+                border: none;
+                border-radius: 6px;
+
+                padding: 11px 16px;
+
+                font-size: 14px;
+                font-weight: bold;
+
+                cursor: pointer;
+
+                box-shadow:
+                    0 3px 10px
+                    rgba(0,0,0,0.35);
+            "
+        >
+
+            ⚠ Project Overlaps
+            ({len(overlaps)})
+
+        </button>
+
+
+        <!-- PANEL -->
+
+        <div
+            id="overlap-panel"
+            style="
+                display: none;
+
+                width: 400px;
+
+                max-height: 80vh;
+
+                margin-top: 8px;
+
+                background: white;
+
+                border: 2px solid #333;
+
+                border-radius: 8px;
+
+                box-shadow:
+                    0 3px 15px
+                    rgba(0,0,0,0.35);
+
+                overflow: hidden;
+            "
+        >
+
+            <!-- HEADER -->
+
+            <div style="
+                background: #222;
+                color: white;
+
+                padding: 12px;
+
+                font-size: 16px;
+                font-weight: bold;
+            ">
+
+                Project Overlap Ranking
+
+                <span style="
+                    float: right;
+
+                    font-size: 12px;
+
+                    font-weight: normal;
+
+                    opacity: 0.8;
+                ">
+
+                    {len(overlaps)} overlaps
+
+                </span>
+
+            </div>
+
+
+            <!-- DESCRIPTION -->
+
+            <div style="
+                padding: 8px 12px;
+
+                background: #f4f4f4;
+
+                border-bottom:
+                    1px solid #ccc;
+
+                font-size: 12px;
+
+                color: #555;
+            ">
+
+                Ranked by geographic distance.
+                Click an entry to focus the map.
+
+            </div>
+
+
+            <!-- TABLE -->
+
+            <div style="
+                max-height:
+                    calc(80vh - 110px);
+
+                overflow-y: auto;
+            ">
+
+                {rows_html}
+
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- JAVASCRIPT -->
+
+    <script>
+
+        function toggleOverlapPanel() {{
+
+            var panel =
+                document.getElementById(
+                    "overlap-panel"
+                );
+
+            var button =
+                document.getElementById(
+                    "overlap-toggle"
+                );
+
+            if (
+                panel.style.display === "none"
+                || panel.style.display === ""
+            ) {{
+
+                panel.style.display = "block";
+
+                button.innerHTML =
+                    "✕ Close Overlaps";
+
+            }} else {{
+
+                panel.style.display = "none";
+
+                button.innerHTML =
+                    "⚠ Project Overlaps ({len(overlaps)})";
+
+            }}
+
+        }}
+
+
+        function focusOverlap(
+            lat1,
+            lon1,
+            lat2,
+            lon2,
+            rank
+        ) {{
+
+            /*
+             * Find the Leaflet map generated by Folium.
+             */
+
+            var mapObject = null;
+
+            for (
+                var key in window
+            ) {{
+
+                if (
+                    key.startsWith("map_")
+                    &&
+                    window[key]
+                    &&
+                    typeof window[key].fitBounds
+                        === "function"
+                ) {{
+
+                    mapObject =
+                        window[key];
+
+                    break;
+
+                }}
+
+            }}
+
+
+            if (!mapObject) {{
+
+                console.error(
+                    "Could not find Leaflet map."
+                );
+
+                return;
+
+            }}
+
+
+            /*
+             * Create bounds around the
+             * two project locations.
+             */
+
+            var bounds = [
+                [lat1, lon1],
+                [lat2, lon2]
+            ];
+
+
+            /*
+             * Zoom map to both projects.
+             */
+
+            mapObject.fitBounds(
+                bounds,
+                {{
+                    padding: [
+                        100,
+                        100
+                    ],
+
+                    maxZoom: 12
+                }}
+            );
+
+
+            /*
+             * Add a temporary highlighted
+             * connection between the two.
+             */
+
+            if (
+                window.activeOverlapLine
+            ) {{
+
+                mapObject.removeLayer(
+                    window.activeOverlapLine
+                );
+
+            }}
+
+
+            window.activeOverlapLine =
+                L.polyline(
+                    bounds,
+                    {{
+
+                        color: "#ff0000",
+
+                        weight: 8,
+
+                        opacity: 0.9,
+
+                        dashArray: "10, 8"
+
+                    }}
+                ).addTo(
+                    mapObject
+                );
+
+
+            /*
+             * Remove highlight after 5 seconds.
+             */
+
+            setTimeout(
+                function() {{
+
+                    if (
+                        window.activeOverlapLine
+                    ) {{
+
+                        mapObject.removeLayer(
+                            window.activeOverlapLine
+                        );
+
+                        window.activeOverlapLine =
+                            null;
+
+                    }}
+
+                }},
+                5000
+            );
+
+        }}
+
+    </script>
+
+    """
+
+    fmap.get_root().html.add_child(
+        Element(panel_html)
+    )
+
 
 # ============================================================
 # BUILD MAP
@@ -651,6 +1226,13 @@ def build_map(
         overlaps,
         project_lookup
     )
+
+    add_overlap_ranking_panel(
+        fmap,
+        overlaps,
+        project_lookup
+    )
+
 
     # --------------------------------------------------------
     # Layer controls
