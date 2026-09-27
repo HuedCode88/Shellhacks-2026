@@ -4,6 +4,7 @@ import json
 import os
 import time
 import zipfile
+from datetime import datetime
 from html import escape
 from threading import Lock
 from urllib.error import URLError
@@ -932,6 +933,112 @@ def _add_project_search(fmap, projects):
 
     fmap.get_root().html.add_child(Element(search_html))
 
+_PLANNED_KEYWORDS = ("plan", "propos", "future")
+_DATE_FORMATS = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d")
+
+def _parse_loose_date(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    for date_format in _DATE_FORMATS:
+        try:
+            return datetime.strptime(text, date_format)
+        except ValueError:
+            continue
+    return None
+
+def _status_color_hex(category, fields):
+    """Buckets a project into exactly two colors -- "planned" (blue) or
+    "current" (orange) -- so status reads consistently across every
+    utility/layer, instead of the previous per-utility coloring.
+
+    Not every data source has an explicit status: DESC's "Status" column
+    (via `category`) says "Planned" or "In Progress" directly, but GA
+    ITS only has "Sponsor" in that slot, and an uploaded document might
+    not include a status field Gemini could extract at all. For anything
+    without recognizable status wording, this falls back to comparing an
+    in-service/completion date (whichever date-like field is present)
+    against today -- a date still in the future reads as "planned",
+    anything at or before today reads as "current"."""
+    text = (category or "").strip().lower()
+    if any(keyword in text for keyword in _PLANNED_KEYWORDS):
+        return ICON_COLOR_HEX["blue"]
+
+    for field_name, value in (fields or {}).items():
+        if "date" not in field_name.lower():
+            continue
+        parsed = _parse_loose_date(str(value))
+        if parsed and parsed > datetime.now():
+            return ICON_COLOR_HEX["blue"]
+
+    return ICON_COLOR_HEX["orange"]
+
+def _add_color_mode_control(fmap, marker_records, utility_colors):
+    """Renders a dropdown that switches every marker's color between
+    "status" (planned/current) and "utility" mode client-side, with no
+    server round-trip -- the map is a static rendered page, so both
+    colors for every marker are computed once up front and swapped via
+    Leaflet's setStyle() when the dropdown changes. The legend text below
+    the dropdown updates to match whichever mode is selected.
+
+    marker_records: list of (marker_js_var_name, status_hex, utility_hex)
+    utility_colors: {utility_name: hex} -- one entry per distinct layer
+    """
+    from branca.element import Element
+
+    status_legend_html = (
+        f'<div style="display:flex;align-items:center;margin-bottom:4px;">'
+        f'<span style="display:inline-block;width:12px;height:12px;border-radius:50%;'
+        f'background:{ICON_COLOR_HEX["blue"]};margin-right:8px;"></span>Planned</div>'
+        f'<div style="display:flex;align-items:center;">'
+        f'<span style="display:inline-block;width:12px;height:12px;border-radius:50%;'
+        f'background:{ICON_COLOR_HEX["orange"]};margin-right:8px;"></span>Current / In Progress</div>'
+    )
+    utility_legend_html = "".join(
+        f'<div style="display:flex;align-items:center;margin-bottom:4px;">'
+        f'<span style="display:inline-block;width:12px;height:12px;border-radius:50%;'
+        f'background:{hex_color};margin-right:8px;"></span>{escape(str(name))}</div>'
+        for name, hex_color in utility_colors.items()
+    )
+
+    marker_data_js = ",\n            ".join(
+        f'{{ marker: {marker_var}, status: "{status_hex}", utility: "{utility_hex}" }}'
+        for marker_var, status_hex, utility_hex in marker_records
+    )
+
+    control_html = f"""
+    <div id="color-mode-container" style="position:fixed;bottom:20px;left:20px;z-index:9999;
+                font-family:Arial,sans-serif;background:white;border:1px solid #ccc;border-radius:6px;
+                padding:10px 14px;box-shadow:0 3px 10px rgba(0,0,0,0.25);font-size:13px;">
+        <div style="font-weight:bold;margin-bottom:6px;">
+            Color by:
+            <select id="color-mode-select" style="margin-left:6px;font-size:13px;">
+                <option value="status">Status</option>
+                <option value="utility">Utility</option>
+            </select>
+        </div>
+        <div id="color-mode-legend">{status_legend_html}</div>
+    </div>
+    <script>
+        var colorModeMarkers = [
+            {marker_data_js}
+        ];
+        var statusLegendHtml = {json.dumps(status_legend_html)};
+        var utilityLegendHtml = {json.dumps(utility_legend_html)};
+
+        document.getElementById("color-mode-select").addEventListener("change", function(event) {{
+            var mode = event.target.value;
+            colorModeMarkers.forEach(function(entry) {{
+                var color = mode === "utility" ? entry.utility : entry.status;
+                entry.marker.setStyle({{ color: color, fillColor: color }});
+            }});
+            document.getElementById("color-mode-legend").innerHTML =
+                mode === "utility" ? utilityLegendHtml : statusLegendHtml;
+        }});
+    </script>
+    """
+    fmap.get_root().html.add_child(Element(control_html))
+
 def build_map(projects):
     if not projects:
         raise ValueError("No geocoded projects found -- nothing to map.")
@@ -947,6 +1054,8 @@ def build_map(projects):
     _add_project_search(fmap, projects)
 
     layers = {}
+    layer_hex_cache = {}
+    marker_records = []
     for p in projects:
         layer_name = p.get("sheet") or p.get("source_name") or "Projects"
         if layer_name not in layers:
@@ -982,17 +1091,27 @@ def build_map(projects):
             popup_lines.append(f"<b>{escape(str(field).strip())}:</b> {escape(display_value)}")
         popup_html += "<br>".join(popup_lines)
 
-        folium.CircleMarker(
+        status_hex = _status_color_hex(p.get("category"), p.get("fields"))
+        if layer_name not in layer_hex_cache:
+            layer_hex_cache[layer_name] = ICON_COLOR_HEX.get(
+                p.get("color") or get_source_color(layer_name), "#2b2b2b"
+            )
+        utility_hex = layer_hex_cache[layer_name]
+
+        marker = folium.CircleMarker(
             location=[p["lat"], p["lon"]],
             radius=6,
-            color=ICON_COLOR_HEX.get(p.get("color") or get_source_color(layer_name), "#2b2b2b"),
+            color=status_hex,  # default view; the toggle below can switch this
             weight=1.5,
             fill=True,
             fill_opacity=0.85,
             tooltip=escape(title),
             popup=folium.Popup(popup_html, max_width=350),
-        ).add_to(layers[layer_name])
+        )
+        marker.add_to(layers[layer_name])
+        marker_records.append((marker.get_name(), status_hex, utility_hex))
 
+    _add_color_mode_control(fmap, marker_records, layer_hex_cache)
 
     try:
         overlaps = _load_workbook_overlaps()
