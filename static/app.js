@@ -5,7 +5,6 @@ const utilityNameInput = document.querySelector("#utility-name");
 const uploadStatus = document.querySelector("#upload-status");
 const uploadCount = document.querySelector("#upload-count");
 const uploadCountBadge = document.querySelector("#upload-count-badge");
-const totalCount = document.querySelector("#total-count");
 const databaseMode = document.querySelector("#database-mode");
 const setupWarning = document.querySelector("#setup-warning");
 const clearButton = document.querySelector("#clear-uploads");
@@ -15,6 +14,8 @@ const importsToggle = document.querySelector("#imports-toggle");
 const uploadDrawer = document.querySelector("#upload-drawer");
 const drawerBackdrop = document.querySelector("#drawer-backdrop");
 const drawerClose = document.querySelector("#drawer-close");
+const totalCount = document.querySelector("#total-count");
+console.log("totalCount:", totalCount);
 
 function openDrawer() {
   uploadDrawer.classList.add("is-open");
