@@ -973,71 +973,60 @@ def _status_color_hex(category, fields):
 
     return ICON_COLOR_HEX["orange"]
 
-def _add_color_mode_control(fmap, marker_records, utility_colors):
-    """Renders a dropdown that switches every marker's color between
-    "status" (planned/current) and "utility" mode client-side, with no
-    server round-trip -- the map is a static rendered page, so both
-    colors for every marker are computed once up front and swapped via
-    Leaflet's setStyle() when the dropdown changes. The legend text below
-    the dropdown updates to match whichever mode is selected.
-
-    marker_records: list of (marker_js_var_name, status_hex, utility_hex)
-    utility_colors: {utility_name: hex} -- one entry per distinct layer
-    """
+def _add_color_mode_control(fmap, marker_records):
     from branca.element import Element
 
-    status_legend_html = (
-        f'<div style="display:flex;align-items:center;margin-bottom:4px;">'
-        f'<span style="display:inline-block;width:12px;height:12px;border-radius:50%;'
-        f'background:{ICON_COLOR_HEX["blue"]};margin-right:8px;"></span>Planned</div>'
-        f'<div style="display:flex;align-items:center;">'
-        f'<span style="display:inline-block;width:12px;height:12px;border-radius:50%;'
-        f'background:{ICON_COLOR_HEX["orange"]};margin-right:8px;"></span>Current / In Progress</div>'
-    )
-    utility_legend_html = "".join(
-        f'<div style="display:flex;align-items:center;margin-bottom:4px;">'
-        f'<span style="display:inline-block;width:12px;height:12px;border-radius:50%;'
-        f'background:{hex_color};margin-right:8px;"></span>{escape(str(name))}</div>'
-        for name, hex_color in utility_colors.items()
-    )
-
-    marker_data_js = ",\n            ".join(
-        f'{{ marker: {marker_var}, status: "{status_hex}", utility: "{utility_hex}" }}'
-        for marker_var, status_hex, utility_hex in marker_records
+    marker_data_js = ",\n".join(
+        f"""
+        {{
+            marker: {marker_var},
+            utility: "{utility_color}"
+        }}
+        """
+        for marker_var, utility_color in marker_records
     )
 
     control_html = f"""
-    <div id="color-mode-container" style="position:fixed;bottom:20px;left:20px;z-index:9999;
-                font-family:Arial,sans-serif;background:white;border:1px solid #ccc;border-radius:6px;
-                padding:10px 14px;box-shadow:0 3px 10px rgba(0,0,0,0.25);font-size:13px;">
-        <div style="font-weight:bold;margin-bottom:6px;">
-            Color by:
-            <select id="color-mode-select" style="margin-left:6px;font-size:13px;">
-                <option value="status">Status</option>
-                <option value="utility">Utility</option>
-            </select>
+    <div id="color-mode-container"
+         style="position:fixed;bottom:20px;left:20px;z-index:9999;
+                font-family:Arial,sans-serif;background:white;
+                border:1px solid #ccc;border-radius:6px;
+                padding:10px 14px;box-shadow:0 3px 10px rgba(0,0,0,0.25);
+                font-size:13px;">
+
+        <div>
+            <div>
+                <span style="display:inline-block;width:12px;height:12px;
+                    border-radius:50%;background:#007bff;margin-right:8px;">
+                </span>
+                DESC
+            </div>
+
+            <div>
+                <span style="display:inline-block;width:12px;height:12px;
+                    border-radius:50%;background:#fd7e14;margin-right:8px;">
+                </span>
+                GA ITS
+            </div>
         </div>
-        <div id="color-mode-legend">{status_legend_html}</div>
     </div>
+
     <script>
-        var colorModeMarkers = [
+        var utilityMarkers = [
             {marker_data_js}
         ];
-        var statusLegendHtml = {json.dumps(status_legend_html)};
-        var utilityLegendHtml = {json.dumps(utility_legend_html)};
 
-        document.getElementById("color-mode-select").addEventListener("change", function(event) {{
-            var mode = event.target.value;
-            colorModeMarkers.forEach(function(entry) {{
-                var color = mode === "utility" ? entry.utility : entry.status;
-                entry.marker.setStyle({{ color: color, fillColor: color }});
+        utilityMarkers.forEach(function(entry) {{
+            entry.marker.setStyle({{
+                color: entry.utility,
+                fillColor: entry.utility
             }});
-            document.getElementById("color-mode-legend").innerHTML =
-                mode === "utility" ? utilityLegendHtml : statusLegendHtml;
         }});
     </script>
     """
+
     fmap.get_root().html.add_child(Element(control_html))
+
 
 def build_map(projects):
     if not projects:
@@ -1091,27 +1080,35 @@ def build_map(projects):
             popup_lines.append(f"<b>{escape(str(field).strip())}:</b> {escape(display_value)}")
         popup_html += "<br>".join(popup_lines)
 
-        status_hex = _status_color_hex(p.get("category"), p.get("fields"))
-        if layer_name not in layer_hex_cache:
-            layer_hex_cache[layer_name] = ICON_COLOR_HEX.get(
-                p.get("color") or get_source_color(layer_name), "#2b2b2b"
-            )
-        utility_hex = layer_hex_cache[layer_name]
+        if layer_name == "DESC Geocoded":
+            utility_hex = "#007bff"       # blue
+        elif layer_name == "GA ITS Geocoded":
+            utility_hex = "#fd7e14"       # orange
+        else:
+            utility_hex = "#2b2b2b"       # fallback
 
         marker = folium.CircleMarker(
             location=[p["lat"], p["lon"]],
             radius=6,
-            color=status_hex,  # default view; the toggle below can switch this
+            color=utility_hex,
             weight=1.5,
             fill=True,
+            fill_color=utility_hex,
             fill_opacity=0.85,
             tooltip=escape(title),
             popup=folium.Popup(popup_html, max_width=350),
         )
-        marker.add_to(layers[layer_name])
-        marker_records.append((marker.get_name(), status_hex, utility_hex))
 
-    _add_color_mode_control(fmap, marker_records, layer_hex_cache)
+        marker.add_to(layers[layer_name])
+
+        marker_records.append(
+            (marker.get_name(), utility_hex)
+        )
+
+        marker.add_to(layers[layer_name])
+        marker_records.append((marker.get_name(), utility_hex))
+
+    _add_color_mode_control(fmap, layer_hex_cache)
 
     try:
         overlaps = _load_workbook_overlaps()
