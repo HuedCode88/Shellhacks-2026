@@ -143,6 +143,11 @@ def _project_from_database_row(row):
     if isinstance(fields, str):
         fields = json.loads(fields)
     return {
+        # The database's own primary key -- the only value that's always
+        # unique and stable, even for uploads with no external project_id.
+        # This is what delete_project() below expects, and what the
+        # frontend needs to send back when the user deletes a project.
+        "db_id": row["id"],
         "source_type": row["source_type"],
         "source_name": row["source_name"],
         "sheet": row["source_name"],
@@ -342,9 +347,33 @@ def save_uploaded_projects(projects):
     return added, len(load_uploaded_projects())
 
 def clear_uploaded_projects():
+    """Deletes every uploaded project. Kept for a "clear all uploads"
+    action -- use delete_project() for removing a single project."""
     initialize_database()
     with DATABASE_LOCK:
         with _database_engine().begin() as connection:
             connection.execute(
                 delete(PROJECTS_TABLE).where(PROJECTS_TABLE.c.source_type == "upload")
             )
+
+
+def delete_project(db_id):
+    """Deletes exactly one project by its database primary key (the
+    "db_id" field from _project_from_database_row / the API response) --
+    not by name, external_id, or any other value that might collide or be
+    missing. Returns True if a row was actually deleted, False if db_id
+    didn't match anything (already gone, or never existed).
+
+    This is what actually frees up the project's source_key so a later
+    reimport of the same document isn't silently skipped by
+    on_conflict_do_nothing() in _insert_database_project() -- if the row
+    still exists, a reimport with the same id/name/coordinates hashes to
+    the same source_key and gets treated as a duplicate.
+    """
+    initialize_database()
+    with DATABASE_LOCK:
+        with _database_engine().begin() as connection:
+            result = connection.execute(
+                delete(PROJECTS_TABLE).where(PROJECTS_TABLE.c.id == db_id)
+            )
+            return result.rowcount > 0
