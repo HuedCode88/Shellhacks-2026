@@ -5,7 +5,7 @@ APP_DIR = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(APP_DIR, ".env"))
 
 EXCEL_FILE = os.path.join(
-    APP_DIR, "gridlock_project_tables_geocoded_nominatim (1).xlsx"
+    APP_DIR, "gridlock_project_tables_geocoded.xlsx"
 )
 UPLOADS_FILE = os.path.join(APP_DIR, "uploaded_projects.json")
 DATABASE_FILE = os.path.join(APP_DIR, "projects.sqlite3")

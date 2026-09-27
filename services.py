@@ -21,7 +21,215 @@ from config import (
     PDF_PAGES_PER_REQUEST, PDF_PAGE_OVERLAP, PROJECT_RESPONSE_SCHEMA
 )
 from utils import safe_float, _clean_text, _source_color, _normalise_field_name
+# add to the existing imports at the top of services.py
+from config import EXCEL_FILE
+from build_overlap_table import (
+    load_desc_projects,
+    load_gpc_projects,
+    build_overlap_table as compute_overlap_table,
+)
 
+OVERLAP_LINE_COLOR = "#00FFFF"  # every tier used this same color in the original script
+
+
+def _load_workbook_overlaps():
+    """Reads DESC/GPC projects straight from the workbook and computes overlaps."""
+    wb = openpyxl.load_workbook(EXCEL_FILE, data_only=True)
+    try:
+        desc_projects = load_desc_projects(wb)
+        gpc_projects = load_gpc_projects(wb)
+    finally:
+        wb.close()
+    return compute_overlap_table(desc_projects, gpc_projects)
+
+
+def _build_project_lookup(projects):
+    lookup = {}
+    for project in projects:
+        sheet = project.get("sheet")
+        project_id = project.get("id")
+        if sheet is None or project_id is None:
+            continue
+        lookup[(sheet, str(project_id).strip())] = project
+    return lookup
+
+
+def _add_overlap_lines(fmap, overlaps, project_lookup):
+    from branca.element import Element
+
+    overlap_layer = folium.FeatureGroup(name="Project Overlaps", show=True)
+    drawn = 0
+    highlight_snippets = []
+
+    for overlap in overlaps:
+        desc_project = project_lookup.get(("DESC Geocoded", str(overlap["desc_id"]).strip()))
+        gpc_project = project_lookup.get(("GA ITS Geocoded", str(overlap["gpc_id"]).strip()))
+        if desc_project is None or gpc_project is None:
+            continue
+
+        start = [desc_project["lat"], desc_project["lon"]]
+        end = [gpc_project["lat"], gpc_project["lon"]]
+
+        desc_name = escape(str(desc_project.get("name") or overlap["desc_id"]))
+        gpc_name = escape(str(gpc_project.get("name") or overlap["gpc_id"]))
+
+        timeline = overlap["timeline_overlap"]
+        timeline_text = "Unknown" if timeline is None else ("Yes" if timeline else "No")
+
+        popup_html = f"""
+        <div style="font-family: Arial;">
+            <h4 style="margin-bottom: 8px;">Project Overlap</h4>
+            <b>DESC:</b><br>{desc_name}<br>ID: {escape(str(overlap["desc_id"]))}
+            <br><br>
+            <b>GPC:</b><br>{gpc_name}<br>ID: {escape(str(overlap["gpc_id"]))}
+            <br><br>
+            <b>Distance:</b> {overlap["distance_km"]} km ({overlap["distance_mi"]} mi)
+            <br><br>
+            <b>Geographic tier:</b><br>{escape(overlap["geographic_tier"])}
+            <br><br>
+            <b>Timeline overlap:</b> {timeline_text}
+            <br>
+            <b>In-service date gap:</b> {overlap["day_gap"] if overlap["day_gap"] is not None else "Unknown"} days
+        </div>
+        """
+
+        folium.PolyLine(locations=[start, end], color="#111111", weight=5, opacity=0.9).add_to(overlap_layer)
+
+        highlight_line = folium.PolyLine(
+            locations=[start, end],
+            color=OVERLAP_LINE_COLOR,
+            weight=3,
+            opacity=1.0,
+            tooltip=f"{desc_name} ↔ {gpc_name} | {overlap['distance_mi']} mi",
+            popup=folium.Popup(popup_html, max_width=400),
+        )
+        highlight_line.add_to(overlap_layer)
+
+        line_name = highlight_line.get_name()
+        highlight_snippets.append(f"""
+            {line_name}.on('mouseover', function(e) {{
+                e.target.setStyle({{ weight: 7, color: '#ffffff' }});
+                e.target.bringToFront();
+            }});
+            {line_name}.on('mouseout', function(e) {{
+                e.target.setStyle({{ weight: 3, color: '{OVERLAP_LINE_COLOR}' }});
+            }});
+        """)
+
+        drawn += 1
+
+    overlap_layer.add_to(fmap)
+
+    if highlight_snippets:
+        script = "<script>\n" + "\n".join(highlight_snippets) + "\n</script>"
+        fmap.get_root().html.add_child(Element(script))
+
+    print(f"Added {drawn} overlap lines to map.")
+
+
+def _add_overlap_ranking_panel(fmap, overlaps, project_lookup):
+    if not overlaps:
+        return
+
+    from branca.element import Element
+
+    rows_html = ""
+    for rank, overlap in enumerate(overlaps, start=1):
+        desc_project = project_lookup.get(("DESC Geocoded", str(overlap["desc_id"]).strip()))
+        gpc_project = project_lookup.get(("GA ITS Geocoded", str(overlap["gpc_id"]).strip()))
+        if desc_project is None or gpc_project is None:
+            continue
+
+        desc_name = escape(str(overlap["desc_name"] or "Unknown DESC Project"))
+        gpc_name = escape(str(overlap["gpc_name"] or "Unknown GPC Project"))
+        tier = overlap["geographic_tier"]
+        time_text = "Unknown" if overlap["day_gap"] is None else f"{overlap['day_gap']} days"
+
+        if tier.startswith("Touching"):
+            color = "#dc3545"
+        elif tier.startswith("Under 1.6"):
+            color = "#fd7e14"
+        elif tier.startswith("Under 8"):
+            color = "#6f42c1"
+        else:
+            color = "#0d6efd"
+
+        rows_html += f"""
+        <div class="overlap-row" onclick="focusOverlap({desc_project['lat']}, {desc_project['lon']}, {gpc_project['lat']}, {gpc_project['lon']}, {rank});"
+             style="border-bottom:1px solid #ddd;padding:10px 8px;cursor:pointer;"
+             onmouseover="this.style.background='#f0f0f0';" onmouseout="this.style.background='white';">
+            <div style="display:flex;align-items:center;margin-bottom:5px;">
+                <span style="background:{color};color:white;border-radius:50%;width:25px;height:25px;
+                    display:inline-flex;align-items:center;justify-content:center;font-weight:bold;margin-right:8px;">{rank}</span>
+                <strong>{escape(str(overlap['desc_id']))} ↔ {escape(str(overlap['gpc_id']))}</strong>
+            </div>
+            <div style="font-size:12px;color:#444;margin-left:33px;">
+                <div><b>DESC:</b> {desc_name}</div>
+                <div><b>GPC:</b> {gpc_name}</div>
+                <div style="margin-top:5px;color:#222;">
+                    <b>Distance:</b> {overlap['distance_km']:.2f} km ({overlap['distance_mi']:.2f} mi)
+                    &nbsp;|&nbsp; <b>Time:</b> {time_text}
+                </div>
+                <div style="margin-top:3px;color:{color};font-weight:bold;">{escape(tier)}</div>
+            </div>
+        </div>
+        """
+
+    panel_html = f"""
+    <div id="overlap-container" style="position:fixed;bottom:20px;right:20px;z-index:9999;font-family:Arial,sans-serif;">
+        <button id="overlap-toggle" onclick="toggleOverlapPanel()"
+            style="background:#222;color:white;border:none;border-radius:6px;padding:11px 16px;
+                   font-size:14px;font-weight:bold;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,0.35);">
+            ⚠ Project Overlaps ({len(overlaps)})
+        </button>
+        <div id="overlap-panel" style="display:none;width:400px;max-height:80vh;margin-top:8px;background:white;
+                border:2px solid #333;border-radius:8px;box-shadow:0 3px 15px rgba(0,0,0,0.35);overflow:hidden;">
+            <div style="background:#222;color:white;padding:12px;font-size:16px;font-weight:bold;">
+                Project Overlap Ranking
+                <span style="float:right;font-size:12px;font-weight:normal;opacity:0.8;">{len(overlaps)} overlaps</span>
+            </div>
+            <div style="padding:8px 12px;background:#f4f4f4;border-bottom:1px solid #ccc;font-size:12px;color:#555;">
+                Ranked by geographic distance. Click an entry to focus the map.
+            </div>
+            <div style="max-height:calc(80vh - 110px);overflow-y:auto;">{rows_html}</div>
+        </div>
+    </div>
+    <script>
+        function toggleOverlapPanel() {{
+            var panel = document.getElementById("overlap-panel");
+            var button = document.getElementById("overlap-toggle");
+            if (panel.style.display === "none" || panel.style.display === "") {{
+                panel.style.display = "block";
+                button.innerHTML = "✕ Close Overlaps";
+            }} else {{
+                panel.style.display = "none";
+                button.innerHTML = "⚠ Project Overlaps ({len(overlaps)})";
+            }}
+        }}
+        function focusOverlap(lat1, lon1, lat2, lon2, rank) {{
+            var mapObject = null;
+            for (var key in window) {{
+                if (key.startsWith("map_") && window[key] && typeof window[key].fitBounds === "function") {{
+                    mapObject = window[key];
+                    break;
+                }}
+            }}
+            if (!mapObject) {{ console.error("Could not find Leaflet map."); return; }}
+            var bounds = [[lat1, lon1], [lat2, lon2]];
+            mapObject.fitBounds(bounds, {{ padding: [100, 100], maxZoom: 12 }});
+            if (window.activeOverlapLine) {{ mapObject.removeLayer(window.activeOverlapLine); }}
+            window.activeOverlapLine = L.polyline(bounds, {{ color: "#ff0000", weight: 8, opacity: 0.9, dashArray: "10, 8" }}).addTo(mapObject);
+            setTimeout(function() {{
+                if (window.activeOverlapLine) {{
+                    mapObject.removeLayer(window.activeOverlapLine);
+                    window.activeOverlapLine = null;
+                }}
+            }}, 5000);
+        }}
+    </script>
+    """
+
+    fmap.get_root().html.add_child(Element(panel_html))
 GEOCODING_LOCK = Lock()
 LAST_GEOCODE_AT = 0.0
 
@@ -337,6 +545,131 @@ def normalize_uploaded_projects(extracted, filename):
         })
 
     return projects, skipped, geocode_count
+def _add_project_search(fmap, projects):
+    from branca.element import Element
+
+    search_projects = [
+        {
+            "id": str(p["id"]) if p.get("id") is not None else "",
+            "name": str(p.get("name")) if p.get("name") is not None else "",
+            "sheet": str(p.get("sheet") or p.get("source_name") or ""),
+            "category": str(p.get("category")) if p.get("category") is not None else "",
+            "lat": p["lat"],
+            "lon": p["lon"],
+        }
+        for p in projects
+    ]
+    projects_json = json.dumps(search_projects)
+
+    search_html = f"""
+    <style>
+        #project-search-container {{
+            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 9999; font-family: Arial, sans-serif; width: 330px;
+        }}
+        #project-search-box {{
+            background: white; border-radius: 7px;
+            box-shadow: 0 3px 12px rgba(0,0,0,0.3); overflow: hidden;
+        }}
+        #project-search-input {{ flex: 1; border: none; padding: 11px 12px; font-size: 14px; outline: none; min-width: 0; }}
+        #project-search-results {{
+            display: none; margin-top: 6px; background: white; border-radius: 7px;
+            box-shadow: 0 3px 12px rgba(0,0,0,0.3); max-height: 400px; overflow-y: auto;
+        }}
+        .project-search-result {{ padding: 10px 12px; border-bottom: 1px solid #ddd; cursor: pointer; font-size: 13px; }}
+        .project-search-result:hover {{ background: #f0f0f0; }}
+        .project-search-id {{ font-weight: bold; font-size: 14px; margin-bottom: 3px; }}
+        .project-search-name {{ color: #444; line-height: 1.3; }}
+        .project-search-meta {{ color: #777; font-size: 11px; margin-top: 4px; }}
+        .project-search-no-results {{ padding: 12px; color: #666; font-size: 13px; }}
+    </style>
+
+    <div id="project-search-container">
+        <div id="project-search-box">
+            <input id="project-search-input" type="text" placeholder="Search projects..." autocomplete="off">
+        </div>
+        <div id="project-search-results"></div>
+    </div>
+
+    <script>
+        var projectSearchData = {projects_json};
+
+        function searchProjects() {{
+            var input = document.getElementById("project-search-input");
+            var results = document.getElementById("project-search-results");
+            var query = input.value.trim().toLowerCase();
+
+            if (!query) {{
+                results.style.display = "none";
+                results.innerHTML = "";
+                return;
+            }}
+
+            var matches = projectSearchData.filter(function(project) {{
+                var searchable = (project.id + " " + project.name + " " + project.sheet + " " + project.category).toLowerCase();
+                return searchable.includes(query);
+            }});
+
+            matches = matches.slice(0, 15);
+
+            if (matches.length === 0) {{
+                results.innerHTML = '<div class="project-search-no-results">No matching projects found.</div>';
+                results.style.display = "block";
+                return;
+            }}
+
+            var html = "";
+            matches.forEach(function(project) {{
+                var safeId = escapeSearchHtml(project.id);
+                var safeName = escapeSearchHtml(project.name);
+                var safeSheet = escapeSearchHtml(project.sheet);
+                var safeCategory = escapeSearchHtml(project.category);
+
+                html += '<div class="project-search-result" onclick="focusProject(' + project.lat + ',' + project.lon + ')">' +
+                    '<div class="project-search-id">' + safeId + '</div>' +
+                    '<div class="project-search-name">' + safeName + '</div>' +
+                    '<div class="project-search-meta">' + safeSheet + (safeCategory ? " • " + safeCategory : "") + '</div>' +
+                '</div>';
+            }});
+
+            results.innerHTML = html;
+            results.style.display = "block";
+        }}
+
+        function focusProject(lat, lon) {{
+            var mapObject = null;
+            for (var key in window) {{
+                if (key.startsWith("map_") && window[key] && typeof window[key].setView === "function") {{
+                    mapObject = window[key];
+                    break;
+                }}
+            }}
+            if (!mapObject) {{ console.error("Could not find Leaflet map."); return; }}
+
+            mapObject.setView([lat, lon], 13);
+            document.getElementById("project-search-results").style.display = "none";
+            document.getElementById("project-search-input").value = "";
+        }}
+
+        function escapeSearchHtml(value) {{
+            return String(value)
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }}
+
+        document.getElementById("project-search-input").addEventListener("keydown", function(event) {{
+            if (event.key === "Enter") {{ searchProjects(); }}
+        }});
+        document.getElementById("project-search-input").addEventListener("input", function() {{
+            searchProjects();
+        }});
+    </script>
+    """
+
+    fmap.get_root().html.add_child(Element(search_html))
 
 def build_map(projects):
     if not projects:
@@ -344,12 +677,13 @@ def build_map(projects):
 
     center_lat = sum(p["lat"] for p in projects) / len(projects)
     center_lon = sum(p["lon"] for p in projects) / len(projects)
-
     fmap = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=7,
         tiles="OpenStreetMap",
     )
+
+    _add_project_search(fmap, projects)
 
     layers = {}
     for p in projects:
@@ -362,16 +696,14 @@ def build_map(projects):
         if p.get("id") is not None:
             title_bits.append(f"[{_clean_text(p['id'], 120)}]")
         title = " ".join(title_bits)
-        
-        popup_html = f"**{escape(title)}**</b><br>"
+
+        popup_html = f"<b>{escape(title)}</b><br>"
         popup_lines = []
         for field, value in p.get("fields", {}).items():
             if value is None or not str(value).strip():
                 continue
             display_value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
-            popup_lines.append(
-                f"<b>{escape(str(field))}:</b> {escape(display_value)}"
-            )
+            popup_lines.append(f"<b>{escape(str(field))}:</b> {escape(display_value)}")
         popup_html += "<br>".join(popup_lines)
 
         folium.Marker(
@@ -382,5 +714,16 @@ def build_map(projects):
         ).add_to(layers[layer_name])
 
     folium.LayerControl(collapsed=False).add_to(fmap)
+
+    try:
+        overlaps = _load_workbook_overlaps()
+    except (OSError, ValueError, KeyError) as error:
+        print(f"Overlap calculation skipped: {error}")
+        overlaps = []
+
+    if overlaps:
+        project_lookup = _build_project_lookup(projects)
+        _add_overlap_lines(fmap, overlaps, project_lookup)
+        _add_overlap_ranking_panel(fmap, overlaps, project_lookup)
 
     return fmap.get_root().render()
