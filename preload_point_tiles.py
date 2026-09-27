@@ -26,10 +26,10 @@ from main import (
 OSM_USER_AGENT = "Shellhacks-2026-point-tile-preloader/1.0 (local visualization)"
 TILE_URL = "https://tile.openstreetmap.org/{zoom}/{x}/{y}.png"
 US_BOUNDS = {
-    "min_lat": 24.0,
-    "max_lat": 50.0,
-    "min_lon": -125.0,
-    "max_lon": -66.0,
+    "min_lat": 23.0,
+    "max_lat": 51.0,
+    "min_lon": -126.0,
+    "max_lon": -65.0,
 }
 
 
@@ -216,7 +216,7 @@ def main():
     parser.add_argument(
         "--max-zoom",
         type=int,
-        default=8,
+        default=11,
         help="Maximum moderate-detail level for the broad U.S. preload.",
     )
     parser.add_argument(
