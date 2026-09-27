@@ -1,4 +1,4 @@
-.env
+*.env
 uploaded_projects.json
 .uploaded_projects_*.json
 projects.sqlite3

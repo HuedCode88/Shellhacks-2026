@@ -45,87 +45,230 @@ def _load_workbook_overlaps():
 
 def _build_project_lookup(projects):
     lookup = {}
+
     for project in projects:
-        sheet = project.get("sheet")
         project_id = project.get("id")
-        if sheet is None or project_id is None:
+
+        if project_id is None:
             continue
-        lookup[(sheet, str(project_id).strip())] = project
+
+        project_id = str(project_id).strip()
+
+        if not project_id:
+            continue
+
+        sheet = str(project.get("sheet") or "").strip()
+
+        # Exact lookup
+        lookup[(sheet, project_id)] = project
+
+        # Also allow lookup by ID alone.
+        # This prevents sheet-name differences from breaking connections.
+        lookup.setdefault(("ID", project_id), project)
+
     return lookup
+
 
 
 def _add_overlap_lines(fmap, overlaps, project_lookup):
     from branca.element import Element
 
-    overlap_layer = folium.FeatureGroup(name="Project Overlaps", show=True)
+    overlap_layer = folium.FeatureGroup(
+        name="Project Connections",
+        show=True,
+        overlay=True,
+        control=True,
+    )
+
     drawn = 0
+    skipped = 0
     highlight_snippets = []
 
     for overlap in overlaps:
-        desc_project = project_lookup.get(("DESC Geocoded", str(overlap["desc_id"]).strip()))
-        gpc_project = project_lookup.get(("GA ITS Geocoded", str(overlap["gpc_id"]).strip()))
+        desc_id = str(overlap["desc_id"]).strip()
+        gpc_id = str(overlap["gpc_id"]).strip()
+
+        # First try the expected sheet + ID.
+        desc_project = project_lookup.get(
+            ("DESC Geocoded", desc_id)
+        )
+        gpc_project = project_lookup.get(
+            ("GA ITS Geocoded", gpc_id)
+        )
+
+        # Fall back to ID-only lookup.
+        if desc_project is None:
+            desc_project = project_lookup.get(
+                ("ID", desc_id)
+            )
+
+        if gpc_project is None:
+            gpc_project = project_lookup.get(
+                ("ID", gpc_id)
+            )
+
         if desc_project is None or gpc_project is None:
+            skipped += 1
+            print(
+                f"Could not draw connection: "
+                f"DESC={desc_id}, GPC={gpc_id}"
+            )
             continue
 
-        start = [desc_project["lat"], desc_project["lon"]]
-        end = [gpc_project["lat"], gpc_project["lon"]]
+        # Make absolutely sure both projects have coordinates.
+        try:
+            start = [
+                float(desc_project["lat"]),
+                float(desc_project["lon"]),
+            ]
 
-        desc_name = escape(str(desc_project.get("name") or overlap["desc_id"]))
-        gpc_name = escape(str(gpc_project.get("name") or overlap["gpc_id"]))
+            end = [
+                float(gpc_project["lat"]),
+                float(gpc_project["lon"]),
+            ]
+        except (KeyError, TypeError, ValueError):
+            skipped += 1
+            print(
+                f"Connection missing valid coordinates: "
+                f"DESC={desc_id}, GPC={gpc_id}"
+            )
+            continue
 
-        timeline = overlap["timeline_overlap"]
-        timeline_text = "Unknown" if timeline is None else ("Yes" if timeline else "No")
+        desc_name = escape(
+            str(
+                desc_project.get("name")
+                or overlap.get("desc_name")
+                or desc_id
+            )
+        )
+
+        gpc_name = escape(
+            str(
+                gpc_project.get("name")
+                or overlap.get("gpc_name")
+                or gpc_id
+            )
+        )
+
+        timeline = overlap.get("timeline_overlap")
+        timeline_text = (
+            "Unknown"
+            if timeline is None
+            else ("Yes" if timeline else "No")
+        )
 
         popup_html = f"""
-        <div style="font-family: Arial;">
-            <h4 style="margin-bottom: 8px;">Project Overlap</h4>
-            <b>DESC:</b><br>{desc_name}<br>ID: {escape(str(overlap["desc_id"]))}
+        <div style="font-family:Arial,sans-serif;">
+            <h4 style="margin-bottom:8px;">
+                Project Connection
+            </h4>
+
+            <b>DESC:</b><br>
+            {desc_name}<br>
+            ID: {escape(desc_id)}
+
             <br><br>
-            <b>GPC:</b><br>{gpc_name}<br>ID: {escape(str(overlap["gpc_id"]))}
+
+            <b>GPC:</b><br>
+            {gpc_name}<br>
+            ID: {escape(gpc_id)}
+
             <br><br>
-            <b>Distance:</b> {overlap["distance_km"]} km ({overlap["distance_mi"]} mi)
+
+            <b>Distance:</b>
+            {overlap.get("distance_km", "Unknown")} km
+            ({overlap.get("distance_mi", "Unknown")} mi)
+
             <br><br>
-            <b>Geographic tier:</b><br>{escape(overlap["geographic_tier"])}
+
+            <b>Geographic tier:</b><br>
+            {escape(str(overlap.get("geographic_tier", "Unknown")))}
+
             <br><br>
-            <b>Timeline overlap:</b> {timeline_text}
-            <br>
-            <b>In-service date gap:</b> {overlap["day_gap"] if overlap["day_gap"] is not None else "Unknown"} days
+
+            <b>Timeline overlap:</b>
+            {timeline_text}
         </div>
         """
 
-        folium.PolyLine(locations=[start, end], color="#111111", weight=5, opacity=0.9).add_to(overlap_layer)
+        # =========================================================
+        # PERMANENT LINE
+        # =========================================================
+        # =========================================================
+        # PERMANENT CONNECTION
+        # =========================================================
 
-        highlight_line = folium.PolyLine(
+        # Dark outline makes the connection visible against the map.
+        connection_base = folium.PolyLine(
             locations=[start, end],
-            color=OVERLAP_LINE_COLOR,
-            weight=3,
-            opacity=1.0,
-            tooltip=f"{desc_name} ↔ {gpc_name} | {overlap['distance_mi']} mi",
-            popup=folium.Popup(popup_html, max_width=400),
+            color="#000000",
+            weight=9,
+            opacity=0.85,
         )
-        highlight_line.add_to(overlap_layer)
 
-        line_name = highlight_line.get_name()
-        highlight_snippets.append(f"""
+        connection_base.add_to(overlap_layer)
+
+        # Bright cyan line sits on top of the dark outline.
+        connection_line = folium.PolyLine(
+            locations=[start, end],
+            color="#00FFFF",
+            weight=5,
+            opacity=1.0,
+            popup=folium.Popup(
+                popup_html,
+                max_width=400,
+            ),
+            tooltip=f"{desc_name} ↔ {gpc_name}",
+        )
+
+        connection_line.add_to(overlap_layer)
+
+
+        # Hover effect.
+        line_name = connection_line.get_name()
+
+        highlight_snippets.append(
+            f"""
             {line_name}.on('mouseover', function(e) {{
-                e.target.setStyle({{ weight: 7, color: '#ffffff' }});
+                e.target.setStyle({{
+                    weight: 9,
+                    color: '#ffffff',
+                    opacity: 1.0
+                }});
                 e.target.bringToFront();
             }});
+
             {line_name}.on('mouseout', function(e) {{
-                e.target.setStyle({{ weight: 3, color: '{OVERLAP_LINE_COLOR}' }});
+                e.target.setStyle({{
+                    weight: 5,
+                    color: '#00FFFF',
+                    opacity: 0.9
+                }});
             }});
-        """)
+            """
+        )
 
         drawn += 1
 
+    # Add the connection layer to the map.
     overlap_layer.add_to(fmap)
 
+    # Add hover JavaScript.
     if highlight_snippets:
-        script = "<script>\n" + "\n".join(highlight_snippets) + "\n</script>"
-        fmap.get_root().html.add_child(Element(script))
+        script = (
+            "<script>\n"
+            + "\n".join(highlight_snippets)
+            + "\n</script>"
+        )
 
-    print(f"Added {drawn} overlap lines to map.")
+        fmap.get_root().html.add_child(
+            Element(script)
+        )
 
+    print(
+        f"Permanent project connections: "
+        f"{drawn} drawn, {skipped} skipped."
+    )
 
 def _add_overlap_ranking_panel(fmap, overlaps, project_lookup):
     if not overlaps:
@@ -713,8 +856,6 @@ def build_map(projects):
             icon=folium.Icon(color=p.get("color") or _source_color(layer_name)),
         ).add_to(layers[layer_name])
 
-    folium.LayerControl(collapsed=False).add_to(fmap)
-
     try:
         overlaps = _load_workbook_overlaps()
     except (OSError, ValueError, KeyError) as error:
@@ -725,5 +866,7 @@ def build_map(projects):
         project_lookup = _build_project_lookup(projects)
         _add_overlap_lines(fmap, overlaps, project_lookup)
         _add_overlap_ranking_panel(fmap, overlaps, project_lookup)
+
+    folium.LayerControl(collapsed=False).add_to(fmap)
 
     return fmap.get_root().render()

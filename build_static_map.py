@@ -16,7 +16,7 @@ from build_overlap_table import (
 
 EXCEL_FILE = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),
-    "gridlock_project_tables_geocoded_with_descriptions(1).xlsx"
+    "gridlock_project_tables_geocoded.xlsx"
 )
 
 OUTPUT_HTML = os.path.join(
