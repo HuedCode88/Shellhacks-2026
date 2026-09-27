@@ -4,8 +4,6 @@ const fileInput = document.querySelector("#document-file");
 const utilityNameInput = document.querySelector("#utility-name");
 const uploadStatus = document.querySelector("#upload-status");
 const uploadCount = document.querySelector("#upload-count");
-const uploadCountBadge = document.querySelector("#upload-count-badge");
-const databaseMode = document.querySelector("#database-mode");
 const setupWarning = document.querySelector("#setup-warning");
 const clearButton = document.querySelector("#clear-uploads");
 const refreshButton = document.querySelector("#refresh-map");
@@ -68,11 +66,9 @@ async function refreshStatus() {
     const status = await requestJson("/api/status");
     const count = status.uploaded_count;
     uploadCount.textContent = `${count} ${count === 1 ? "project" : "projects"}`;
-    uploadCountBadge.textContent = String(count);
     if (totalCount) {
       totalCount.textContent = `${status.total_count} mapped projects`;
     }
-    databaseMode.textContent = status.database_backend;
     clearButton.disabled = count === 0;
     uploadButton.disabled = !status.gemini_configured;
     setupWarning.hidden = status.gemini_configured;

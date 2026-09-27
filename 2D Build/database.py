@@ -272,7 +272,7 @@ def initialize_database():
                             continue
                         migrated = dict(project)
                         migrated["source_type"] = "upload"
-                        migrated["source_name"] = migrated.get("source_name") or "Company uploads"
+                        migrated["source_name"] = migrated.get("source_name") or "Unnamed utility"
                         migrated["fields"] = migrated.get("fields") or {
                             "Imported details": " ".join(
                                 str(line) for line in migrated.get("popup_lines", [])

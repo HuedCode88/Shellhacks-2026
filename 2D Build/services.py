@@ -138,7 +138,11 @@ def _build_project_lookup(projects):
 def _add_overlap_lines(fmap, overlaps, project_lookup):
     from branca.element import Element
 
-    overlap_layer = folium.FeatureGroup(name="Project Overlaps", show=True)
+    overlap_layer = folium.FeatureGroup(
+        name="Project Overlaps",
+        show=False,
+        control=False,
+    )
     drawn = 0
     highlight_snippets = []
 
@@ -655,7 +659,7 @@ def geocode_endpoints_via_nominatim(name, location, geocode_count, geocode_budge
     return (lat, lon, matched), geocode_count
 
 def normalize_uploaded_projects(extracted, filename, utility_name=""):
-    utility_name = _clean_text(utility_name, 120) or "Company uploads"
+    utility_name = _clean_text(utility_name, 120) or "Unnamed utility"
     projects = []
     skipped = 0
     geocode_count = 0
@@ -1066,22 +1070,7 @@ def _add_legend(fmap, utility_colors, overlaps, project_lookup):
 
     overlap_count = len(overlaps)
     overlap_rows_html = _build_overlap_rows_html(overlaps, project_lookup) if overlaps else ""
-    overlap_section_html = "" if not overlaps else f'''
-    <div id="overlap-toggle-row" onclick="toggleOverlapSection()"
-         style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;
-                background:linear-gradient(135deg,#dc3545,#b8202f);color:white;padding:10px 12px;
-                border-radius:6px;margin:-10px -14px 10px -14px;box-shadow:0 2px 8px rgba(220,53,69,0.5);">
-        <span style="font-weight:bold;font-size:14px;">\u26a0 {overlap_count} Project Overlap{'s' if overlap_count != 1 else ''}</span>
-        <span id="overlap-toggle-arrow" style="font-size:12px;">\u25b2 hide</span>
-    </div>
-    <div id="overlap-section-body" style="display:block;max-height:44vh;overflow-y:auto;margin:-4px -14px 12px -14px;
-                border-bottom:2px solid #eee;">
-        <div style="padding:6px 12px;background:#f4f4f4;font-size:11px;color:#555;">
-            Ranked by distance. Click an entry to focus the map.
-        </div>
-        {overlap_rows_html}
-    </div>
-    '''
+    overlap_section_html = ""
 
     legend_html = f"""
     <div id="legend-container" style="position:fixed;bottom:20px;left:20px;z-index:9999;
