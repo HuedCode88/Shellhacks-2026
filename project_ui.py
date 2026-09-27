@@ -326,7 +326,6 @@ class ProjectInfoPanel:
             "Sponsor (GPC/GTC/MEAG/DU/SAV)",
             "Zone",
             "Year Filed",
-            "confidence",
             "endpoints_tried",
             "matched_endpoint_1",
             "matched_endpoint_2",

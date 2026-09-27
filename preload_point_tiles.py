@@ -16,15 +16,15 @@ import requests
 
 from main import (
     EXCEL_FILE,
-    TILE_CACHE_DIR,
-    TILE_ZOOM,
     lat_to_tile_y,
     load_projects,
     lon_to_tile_x,
+    upload_tile_to_mongo,
 )
 
 OSM_USER_AGENT = "Shellhacks-2026-point-tile-preloader/1.0 (local visualization)"
 TILE_URL = "https://tile.openstreetmap.org/{zoom}/{x}/{y}.png"
+TILE_CACHE_DIR = os.path.join(os.path.dirname(EXCEL_FILE), "map_tiles")
 US_BOUNDS = {
     "min_lat": 23.0,
     "max_lat": 51.0,
@@ -81,6 +81,11 @@ def tile_path(tile):
 def download_tile(tile):
     path = tile_path(tile)
     if os.path.isfile(path):
+        try:
+            with open(path, "rb") as tile_file:
+                upload_tile_to_mongo(tile[0], tile[1], tile[2], tile_file.read())
+        except OSError as error:
+            return f"failed: {error}", tile
         return "cached", tile
 
     zoom, tile_x, tile_y = tile
@@ -96,6 +101,7 @@ def download_tile(tile):
         with open(temporary_path, "wb") as tile_file:
             tile_file.write(response.content)
         os.replace(temporary_path, path)
+        upload_tile_to_mongo(zoom, tile_x, tile_y, response.content)
         return "downloaded", tile
     except requests.RequestException as error:
         return f"failed: {error}", tile

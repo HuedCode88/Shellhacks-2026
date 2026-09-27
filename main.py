@@ -18,6 +18,7 @@ from PIL import Image
 from pygame.locals import DOUBLEBUF, FULLSCREEN, OPENGL
 from pymongo import MongoClient
 
+
 from overlap_logic import build_project_overlaps
 from project_ui import ProjectInfoPanel
 
@@ -30,7 +31,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 EXCEL_FILE = os.path.join(
     BASE_DIR,
-    "gridlock_project_tables_geocoded_nominatim.xlsx",
+    "gridlock_project_tables_geocoded.xlsx",
 )
 
 WINDOW_SIZE = (1200, 800)
@@ -41,6 +42,8 @@ MAX_DETAIL_ZOOM = 17
 MIN_DETAIL_ZOOM = 2
 
 TILE_SIZE = 256
+WORLD_UNITS_PER_TILE = 60.0
+TILE_CACHE_DIR = os.path.join(BASE_DIR, "map_tiles")
 
 MAX_TILE_GRID = 8
 
@@ -291,6 +294,39 @@ def choose_tile_zoom(projects):
 # MONGODB TILE LOADING (with OSM fallback + write-back)
 # ============================================================
 
+def save_tile_to_disk(zoom, tile_x, tile_y, image_bytes):
+    """Mirror every tile fetched by the viewer into the local PNG cache."""
+    tile_path = os.path.join(
+        TILE_CACHE_DIR,
+        str(zoom),
+        str(tile_x),
+        f"{tile_y}.png",
+    )
+    try:
+        os.makedirs(os.path.dirname(tile_path), exist_ok=True)
+        temporary_path = f"{tile_path}.tmp"
+        with open(temporary_path, "wb") as tile_file:
+            tile_file.write(image_bytes)
+        os.replace(temporary_path, tile_path)
+    except OSError as error:
+        print(f"Could not save local tile z={zoom} x={tile_x} y={tile_y}: {error}")
+
+
+def load_tile_from_disk(zoom, tile_x, tile_y):
+    """Read a locally cached PNG tile, if one exists."""
+    tile_path = os.path.join(
+        TILE_CACHE_DIR,
+        str(zoom),
+        str(tile_x),
+        f"{tile_y}.png",
+    )
+    try:
+        with open(tile_path, "rb") as tile_file:
+            image_bytes = tile_file.read()
+        return image_bytes
+    except OSError:
+        return None
+
 def download_tile_from_osm(zoom, tile_x, tile_y):
     """
     Fetches one tile from the public OSM tile server. Used only when
@@ -319,6 +355,12 @@ def upload_tile_to_mongo(zoom, tile_x, tile_y, image_bytes):
     living in MongoDB over time, with no physical map_tiles folder.
     """
     try:
+        existing = MONGO_DB[f"{MONGO_BUCKET_NAME}.files"].find_one(
+            {"metadata.z": zoom, "metadata.x": tile_x, "metadata.y": tile_y},
+            {"_id": 1},
+        )
+        if existing is not None:
+            return
         TILE_FS.put(
             image_bytes,
             filename=f"{zoom}_{tile_x}_{tile_y}.png",
@@ -357,16 +399,20 @@ def fetch_tiles_with_fallback(zoom, min_x, max_x, min_y, max_y):
     if not uncached:
         return
 
-    metadata_cursor = TILE_FS.find({
-        "metadata.z": zoom,
-        "metadata.x": {"$gte": min_x, "$lte": max_x},
-        "metadata.y": {"$gte": min_y, "$lte": max_y},
-    })
+    try:
+        metadata_cursor = TILE_FS.find({
+            "metadata.z": zoom,
+            "metadata.x": {"$gte": min_x, "$lte": max_x},
+            "metadata.y": {"$gte": min_y, "$lte": max_y},
+        })
 
-    grid_out_by_coordinate = {
-        (grid_out.metadata["x"], grid_out.metadata["y"]): grid_out
-        for grid_out in metadata_cursor
-    }
+        grid_out_by_coordinate = {
+            (grid_out.metadata["x"], grid_out.metadata["y"]): grid_out
+            for grid_out in metadata_cursor
+        }
+    except Exception as error:
+        print(f"MongoDB tile lookup failed; using local/OSM fallback: {error}")
+        grid_out_by_coordinate = {}
 
     def read_tile(coordinates):
         tile_x, tile_y = coordinates
@@ -374,12 +420,29 @@ def fetch_tiles_with_fallback(zoom, min_x, max_x, min_y, max_y):
 
         if grid_out is not None:
             try:
-                image = Image.open(BytesIO(grid_out.read())).convert("RGB")
+                image_bytes = grid_out.read()
+                save_tile_to_disk(zoom, tile_x, tile_y, image_bytes)
+                image = Image.open(BytesIO(image_bytes)).convert("RGB")
                 cache_tile((zoom, *coordinates), image)
                 return
             except Exception as error:
                 print(
                     "MongoDB tile decode error "
+                    f"z={zoom} x={tile_x} y={tile_y}: {error} -- falling back to OSM"
+                )
+
+        # MongoDB missed the tile. Use the local map_tiles cache before
+        # contacting OpenStreetMap, preserving the original fast fallback.
+        local_bytes = load_tile_from_disk(zoom, tile_x, tile_y)
+        if local_bytes is not None:
+            try:
+                image = Image.open(BytesIO(local_bytes)).convert("RGB")
+                cache_tile((zoom, *coordinates), image)
+                upload_tile_to_mongo(zoom, tile_x, tile_y, local_bytes)
+                return
+            except OSError as error:
+                print(
+                    "Local tile decode error "
                     f"z={zoom} x={tile_x} y={tile_y}: {error} -- falling back to OSM"
                 )
 
@@ -397,6 +460,7 @@ def fetch_tiles_with_fallback(zoom, min_x, max_x, min_y, max_y):
             return
 
         cache_tile((zoom, *coordinates), image)
+        save_tile_to_disk(zoom, tile_x, tile_y, image_bytes)
         upload_tile_to_mongo(zoom, tile_x, tile_y, image_bytes)
 
     with ThreadPoolExecutor(max_workers=MONGO_TILE_WORKERS) as executor:
@@ -607,10 +671,10 @@ def setup_opengl(width, height):
 
 def draw_floor(texture_id, image, min_x, min_y, center_x, center_y):
 
-    world_width = image.width / TILE_SIZE * 40.0
-    world_depth = image.height / TILE_SIZE * 40.0
-    floor_x = (min_x - center_x) * 40.0
-    floor_z = (min_y - center_y) * 40.0
+    world_width = image.width / TILE_SIZE * WORLD_UNITS_PER_TILE
+    world_depth = image.height / TILE_SIZE * WORLD_UNITS_PER_TILE
+    floor_x = (min_x - center_x) * WORLD_UNITS_PER_TILE
+    floor_z = (min_y - center_y) * WORLD_UNITS_PER_TILE
 
     glEnable(GL_TEXTURE_2D)
     glBindTexture(GL_TEXTURE_2D, texture_id)
@@ -638,8 +702,8 @@ def project_position(project, center_x, center_y, zoom=None):
         zoom = TILE_ZOOM
 
     return (
-        (lon_to_tile_x(project["lon"], zoom) - center_x) * 40.0,
-        (lat_to_tile_y(project["lat"], zoom) - center_y) * 40.0,
+        (lon_to_tile_x(project["lon"], zoom) - center_x) * WORLD_UNITS_PER_TILE,
+        (lat_to_tile_y(project["lat"], zoom) - center_y) * WORLD_UNITS_PER_TILE,
     )
 
 
@@ -680,8 +744,8 @@ def map_point_under_mouse(mouse_position, center_x, center_y, zoom):
     map_x = near_point[0] + fraction * (far_point[0] - near_point[0])
     map_z = near_point[2] + fraction * (far_point[2] - near_point[2])
 
-    tile_x = center_x + map_x / 40.0
-    tile_y = center_y + map_z / 40.0
+    tile_x = center_x + map_x / WORLD_UNITS_PER_TILE
+    tile_y = center_y + map_z / WORLD_UNITS_PER_TILE
 
     return map_x, map_z, tile_y_to_lat(tile_y, zoom), tile_x_to_lon(tile_x, zoom)
 
@@ -1129,8 +1193,8 @@ def main(preload=False):
 
                     old_map_x, old_map_z, focus_lat, focus_lon = pending_focus
 
-                    new_map_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * 40.0
-                    new_map_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * 40.0
+                    new_map_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * WORLD_UNITS_PER_TILE
+                    new_map_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * WORLD_UNITS_PER_TILE
 
                     if old_map_x is not None:
                         camera_offset_x += new_map_x - old_map_x
