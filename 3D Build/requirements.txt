@@ -1,0 +1,9 @@
+pygame
+PyOpenGL
+openpyxl
+Pillow
+requests
+numpy
+python-dateutil
+python-dotenv
+pymongo
