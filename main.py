@@ -18,11 +18,12 @@ from project_ui import ProjectInfoPanel
 
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EXCEL_FILE = os.path.join(BASE_DIR, "gridlock_project_tables_geocoded_nominatim.xlsx")
+EXCEL_FILE = os.path.join(BASE_DIR, "gridlock_project_tables_geocoded.xlsx")
 WINDOW_SIZE = (1200, 800)
 TILE_ZOOM = 8
 MAX_DETAIL_ZOOM = 17
 TILE_SIZE = 256
+WORLD_UNITS_PER_TILE = 60.0
 MAX_TILE_GRID = 8
 FOCUSED_TILE_SPAN = 8
 TELEPORT_ZOOM = 10
@@ -305,10 +306,10 @@ def setup_opengl(width, height):
 
 
 def draw_floor(texture_id, image, min_x, min_y, center_x, center_y):
-    world_width = image.width / TILE_SIZE * 40.0
-    world_depth = image.height / TILE_SIZE * 40.0
-    floor_x = (min_x - center_x) * 40.0
-    floor_z = (min_y - center_y) * 40.0
+    world_width = image.width / TILE_SIZE * WORLD_UNITS_PER_TILE
+    world_depth = image.height / TILE_SIZE * WORLD_UNITS_PER_TILE
+    floor_x = (min_x - center_x) * WORLD_UNITS_PER_TILE
+    floor_z = (min_y - center_y) * WORLD_UNITS_PER_TILE
 
     glEnable(GL_TEXTURE_2D)
     glBindTexture(GL_TEXTURE_2D, texture_id)
@@ -328,8 +329,8 @@ def draw_floor(texture_id, image, min_x, min_y, center_x, center_y):
 
 def project_position(project, center_x, center_y):
     return (
-        (lon_to_tile_x(project["lon"], TILE_ZOOM) - center_x) * 40.0,
-        (lat_to_tile_y(project["lat"], TILE_ZOOM) - center_y) * 40.0,
+        (lon_to_tile_x(project["lon"], TILE_ZOOM) - center_x) * WORLD_UNITS_PER_TILE,
+        (lat_to_tile_y(project["lat"], TILE_ZOOM) - center_y) * WORLD_UNITS_PER_TILE,
     )
 
 
@@ -354,8 +355,8 @@ def map_point_under_mouse(mouse_position, center_x, center_y):
     fraction = -near_point[1] / ray_y
     map_x = near_point[0] + fraction * (far_point[0] - near_point[0])
     map_z = near_point[2] + fraction * (far_point[2] - near_point[2])
-    tile_x = center_x + map_x / 40.0
-    tile_y = center_y + map_z / 40.0
+    tile_x = center_x + map_x / WORLD_UNITS_PER_TILE
+    tile_y = center_y + map_z / WORLD_UNITS_PER_TILE
     return map_x, map_z, tile_y_to_lat(tile_y, TILE_ZOOM), tile_x_to_lon(tile_x, TILE_ZOOM)
 
 
@@ -440,7 +441,7 @@ def draw_overlap_lines(overlaps, center_x, center_y, min_x, max_x, min_y, max_y,
         first_x, first_z = project_position(overlap["first"], center_x, center_y)
         second_x, second_z = project_position(overlap["second"], center_x, center_y)
         is_selected = selected_project in (overlap["first"], overlap["second"])
-        red, green, blue = (1.0, 0.95, 0.15) if is_selected else overlap["color"]
+        red, green, blue = overlap["color"]
         glColor4f(red, green, blue, 0.95 if is_selected else 0.65)
         if is_selected:
             glLineWidth(7.0)
@@ -489,7 +490,7 @@ def main(preload=False):
     info_panel.set_overlaps(overlaps)
 
     camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
-    camera_rotation_x = 52.0
+    camera_rotation_x = 90.0
     camera_rotation_y = 0.0
     camera_offset_x = 0.0
     camera_offset_z = 0.0
@@ -569,6 +570,20 @@ def main(preload=False):
                 if event.button == 1 and info_panel.panel_button_hit(event.pos):
                     info_panel.toggle_panel()
                     continue
+                if event.button == 1 and info_panel.layer_button_hit(event.pos):
+                    info_panel.toggle_layer_panel()
+                    continue
+                if event.button == 1:
+                    layer = info_panel.layer_at(event.pos)
+                    if layer is not None:
+                        if layer == "desc":
+                            show_desc = not show_desc
+                        elif layer == "ga_its":
+                            show_ga_its = not show_ga_its
+                        else:
+                            show_overlaps = not show_overlaps
+                        info_panel.set_layers(show_desc, show_ga_its, show_overlaps)
+                        continue
                 search_result, search_handled = info_panel.search_result_at(event.pos)
                 if search_result is not None:
                     selected_project = search_result
@@ -617,8 +632,8 @@ def main(preload=False):
                         max_x = min_x + map_image.width // TILE_SIZE - 1
                         max_y = min_y + map_image.height // TILE_SIZE - 1
                         texture_id = make_texture(map_image)
-                        camera_offset_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * 40.0 - old_map_x
-                        camera_offset_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * 40.0 - old_map_z
+                        camera_offset_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * WORLD_UNITS_PER_TILE - old_map_x
+                        camera_offset_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * WORLD_UNITS_PER_TILE - old_map_z
                         camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
                 elif event.button == 5:
                     new_zoom = max(2, map_zoom - 1)
@@ -641,8 +656,8 @@ def main(preload=False):
                         max_x = min_x + map_image.width // TILE_SIZE - 1
                         max_y = min_y + map_image.height // TILE_SIZE - 1
                         texture_id = make_texture(map_image)
-                        camera_offset_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * 40.0 - old_map_x
-                        camera_offset_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * 40.0 - old_map_z
+                        camera_offset_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * WORLD_UNITS_PER_TILE - old_map_x
+                        camera_offset_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * WORLD_UNITS_PER_TILE - old_map_z
                         camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 mouse_down = False

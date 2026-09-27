@@ -9,6 +9,7 @@ class ProjectInfoPanel:
     SEARCH_SIZE = (520, 250)
     RANKING_TAB_SIZE = (48, 72)
     PANEL_TAB_SIZE = (48, 72)
+    LAYER_SIZE = (250, 126)
 
     def __init__(self, window_size):
         self.window_width, self.window_height = window_size
@@ -16,6 +17,8 @@ class ProjectInfoPanel:
         self.ranking_surface = pygame.Surface(self.PANEL_SIZE, pygame.SRCALPHA)
         self.ranking_tab_surface = pygame.Surface(self.RANKING_TAB_SIZE, pygame.SRCALPHA)
         self.search_surface = pygame.Surface(self.SEARCH_SIZE, pygame.SRCALPHA)
+        self.layer_surface = pygame.Surface(self.LAYER_SIZE, pygame.SRCALPHA)
+        self.layer_tab_surface = pygame.Surface(self.RANKING_TAB_SIZE, pygame.SRCALPHA)
         self.panel_tab_surface = pygame.Surface(self.PANEL_TAB_SIZE, pygame.SRCALPHA)
         self.title_font = pygame.font.Font(None, 25)
         self.body_font = pygame.font.Font(None, 20)
@@ -24,6 +27,8 @@ class ProjectInfoPanel:
         self.ranking_texture_id = glGenTextures(1)
         self.ranking_tab_texture_id = glGenTextures(1)
         self.search_texture_id = glGenTextures(1)
+        self.layer_texture_id = glGenTextures(1)
+        self.layer_tab_texture_id = glGenTextures(1)
         self.panel_tab_texture_id = glGenTextures(1)
         self.selected_project = None
         self.projects = []
@@ -40,6 +45,7 @@ class ProjectInfoPanel:
         self.show_ga_its = True
         self.show_overlaps = True
         self.panel_visible = True
+        self.layer_visible = False
         self.overlap_count = 0
         self.overlap_lines_rendered = 0
         self.dirty = True
@@ -114,6 +120,29 @@ class ProjectInfoPanel:
         self.show_ga_its = show_ga_its
         self.show_overlaps = show_overlaps
         self.dirty = True
+
+    def layer_at(self, position):
+        x, y = position
+        layer_x, layer_y = self.layer_origin()
+        if self.search_active or not self.layer_visible or not (layer_x <= x <= layer_x + self.LAYER_SIZE[0] and layer_y <= y <= layer_y + self.LAYER_SIZE[1]):
+            return None
+        row = (y - layer_y - 26) // 32
+        return ("desc", "ga_its", "overlaps")[row] if 0 <= row < 3 else None
+
+    def layer_origin(self):
+        return self.window_width - self.LAYER_SIZE[0], 366
+
+    def toggle_layer_panel(self):
+        self.layer_visible = not self.layer_visible
+        self.dirty = True
+
+    def layer_button_hit(self, position):
+        x, y = position
+        layer_x, layer_y = self.layer_origin()
+        if self.layer_visible:
+            return layer_x + self.LAYER_SIZE[0] - 48 <= x <= self.window_width and layer_y <= y <= layer_y + 48
+        tab_y = layer_y
+        return self.window_width - self.RANKING_TAB_SIZE[0] <= x <= self.window_width and tab_y <= y <= tab_y + self.RANKING_TAB_SIZE[1]
 
     def toggle_panel(self):
         self.panel_visible = not self.panel_visible
@@ -251,12 +280,25 @@ class ProjectInfoPanel:
                 ),
                 (18, 176),
             )
-            pygame.draw.circle(self.surface, (40, 210, 110), (24, 208), 6)
-            pygame.draw.circle(self.surface, (255, 170, 40), (24, 232), 6)
-            pygame.draw.circle(self.surface, (35, 150, 245), (24, 256), 6)
-            self.surface.blit(self.small_font.render("DESC: in progress / planned", True, (205, 220, 232)), (38, 201))
-            self.surface.blit(self.small_font.render("GA ITS: sponsors / utilities", True, (205, 220, 232)), (38, 225))
-            self.surface.blit(self.small_font.render("Cyan lines: geographic overlap", True, (205, 220, 232)), (38, 249))
+            legend_rows = (
+                ("DESC - In Progress", (25, 217, 77)),
+                ("DESC - Planned", (255, 140, 20)),
+                ("GPC", (38, 115, 255)),
+                ("GTC", (125, 45, 210)),
+                ("SAV", (245, 75, 150)),
+                ("MEAG / DU", (35, 185, 200)),
+                ("Touch / cross", (255, 255, 255)),
+                ("Overlap < 1.6 km", (255, 204, 0)),
+                ("Overlap < 8 km", (255, 0, 255)),
+                ("Overlap < 40 km", (0, 255, 255)),
+            )
+            for index, (label, color) in enumerate(legend_rows):
+                column = index // 5
+                row = index % 5
+                x = 18 + column * 240
+                y = 201 + row * 18
+                pygame.draw.rect(self.surface, color, (x, y + 2, 10, 10), border_radius=2)
+                self.surface.blit(self.small_font.render(label, True, (190, 205, 215)), (x + 16, y))
         else:
             margin = 18
             text_width = self.PANEL_SIZE[0] - margin * 2
@@ -422,6 +464,22 @@ class ProjectInfoPanel:
         arrow_font = pygame.font.Font(None, 52)
         arrow = arrow_font.render("<", True, (235, 247, 255))
         self.ranking_tab_surface.blit(arrow, arrow.get_rect(center=self.ranking_tab_surface.get_rect().center))
+        self.layer_surface.fill((13, 20, 29, 235))
+        pygame.draw.rect(self.layer_surface, (66, 190, 220, 255), self.layer_surface.get_rect(), width=2, border_radius=5)
+        self.layer_surface.blit(self.small_font.render("Map layers", True, (235, 247, 255)), (12, 8))
+        pygame.draw.rect(self.layer_surface, (34, 72, 90, 255), (self.LAYER_SIZE[0] - 48, 0, 48, 48), border_radius=4)
+        layer_close = pygame.font.Font(None, 40).render(">", True, (235, 247, 255))
+        self.layer_surface.blit(layer_close, layer_close.get_rect(center=(self.LAYER_SIZE[0] - 24, 24)))
+        layer_rows = (
+            ("DESC projects", self.show_desc, (40, 210, 110)),
+            ("GA ITS projects", self.show_ga_its, (35, 150, 245)),
+            ("Overlap lines", self.show_overlaps, (0, 220, 220)),
+        )
+        for index, (label, enabled, color) in enumerate(layer_rows):
+            y = 34 + index * 29
+            pygame.draw.rect(self.layer_surface, color if enabled else (70, 80, 90), (12, y + 3, 14, 14), border_radius=3)
+            self.layer_surface.blit(self.small_font.render(label, True, (215, 225, 232)), (34, y))
+
         self.panel_tab_surface.fill((13, 20, 29, 245))
         pygame.draw.rect(self.panel_tab_surface, (66, 190, 220, 255), self.panel_tab_surface.get_rect(), width=2, border_radius=4)
         pygame.draw.rect(self.panel_tab_surface, (34, 72, 90, 255), self.panel_tab_surface.get_rect(), border_radius=4)
@@ -452,6 +510,13 @@ class ProjectInfoPanel:
         self._upload_surface(self.ranking_surface, self.ranking_texture_id)
         self._upload_surface(self.ranking_tab_surface, self.ranking_tab_texture_id)
         self._upload_surface(self.search_surface, self.search_texture_id)
+        self._upload_surface(self.layer_surface, self.layer_texture_id)
+        self.layer_tab_surface.fill((13, 20, 29, 245))
+        pygame.draw.rect(self.layer_tab_surface, (66, 190, 220, 255), self.layer_tab_surface.get_rect(), width=2, border_radius=4)
+        pygame.draw.rect(self.layer_tab_surface, (34, 72, 90, 255), self.layer_tab_surface.get_rect(), border_radius=4)
+        layer_arrow = pygame.font.Font(None, 52).render("<", True, (235, 247, 255))
+        self.layer_tab_surface.blit(layer_arrow, layer_arrow.get_rect(center=self.layer_tab_surface.get_rect().center))
+        self._upload_surface(self.layer_tab_surface, self.layer_tab_texture_id)
         self._upload_surface(self.panel_tab_surface, self.panel_tab_texture_id)
         self.dirty = False
 
@@ -508,6 +573,12 @@ class ProjectInfoPanel:
             panel_tab_y = self.window_height - 24 - self.PANEL_TAB_SIZE[1]
             draw_texture(self.panel_tab_texture_id, *self.PANEL_TAB_SIZE, 0, panel_tab_y)
         draw_texture(self.search_texture_id, self.SEARCH_SIZE[0], self.SEARCH_SIZE[1], 24, 24)
+        layer_x, layer_y = self.layer_origin()
+        if not self.search_active:
+            if self.layer_visible:
+                draw_texture(self.layer_texture_id, *self.LAYER_SIZE, layer_x, layer_y)
+            else:
+                draw_texture(self.layer_tab_texture_id, *self.RANKING_TAB_SIZE, self.window_width - self.RANKING_TAB_SIZE[0], layer_y)
         if self.ranking_active:
             if self.ranking_minimized:
                 draw_texture(self.ranking_tab_texture_id, *self.RANKING_TAB_SIZE, self.window_width - self.RANKING_TAB_SIZE[0], self.window_height // 3 - self.RANKING_TAB_SIZE[1] // 2)
@@ -523,4 +594,6 @@ class ProjectInfoPanel:
     def close(self):
         glDeleteTextures([self.texture_id])
         glDeleteTextures([self.ranking_texture_id, self.ranking_tab_texture_id, self.search_texture_id])
+        glDeleteTextures([self.layer_texture_id])
+        glDeleteTextures([self.layer_tab_texture_id])
         glDeleteTextures([self.panel_tab_texture_id])

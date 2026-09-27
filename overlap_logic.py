@@ -9,10 +9,10 @@ DISTANCE_TIERS = (
 )
 
 OVERLAP_COLORS = {
-    "Touching / Crossing -- must coordinate (outage timing, crossing structures)": (0.95, 0.15, 0.12),
-    "Under 1.6 km -- can share the right-of-way (access roads, permits)": (1.0, 0.55, 0.05),
-    "Under 8 km -- can share site logistics (laydown yards, deliveries)": (0.72, 0.2, 0.9),
-    "Under 40 km -- can share crews & equipment": (0.15, 0.45, 1.0),
+    "Touching / Crossing -- must coordinate (outage timing, crossing structures)": (1.0, 1.0, 1.0),
+    "Under 1.6 km -- can share the right-of-way (access roads, permits)": (1.0, 0.8, 0.0),
+    "Under 8 km -- can share site logistics (laydown yards, deliveries)": (1.0, 0.0, 1.0),
+    "Under 40 km -- can share crews & equipment": (0.0, 1.0, 1.0),
 }
 
 
