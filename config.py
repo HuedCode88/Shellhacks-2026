@@ -73,6 +73,19 @@ ICON_COLORS = (
     "purple", "red", "beige", "gray", "black",
 )  # "white" deliberately excluded -- poor contrast against the map canvas
 
+# Hex equivalents of the names above, for anything (like CircleMarker)
+# that needs a real CSS color rather than a Leaflet pin-icon name -- a
+# few of these names ("darkpurple", "lightred") aren't valid CSS colors
+# at all and would silently render wrong/black without this mapping.
+ICON_COLOR_HEX = {
+    "blue": "#3186cc", "cadetblue": "#5f9ea0", "darkblue": "#0b3d91",
+    "darkgreen": "#046307", "darkpurple": "#4b0082", "darkred": "#8b0000",
+    "green": "#2e8b57", "lightblue": "#87ceeb", "lightgreen": "#90ee90",
+    "lightred": "#ff6961", "orange": "#ff8c00", "pink": "#ff69b4",
+    "purple": "#9932cc", "red": "#e31a1c", "beige": "#d2b48c",
+    "gray": "#808080", "black": "#2b2b2b",
+}
+
 FIELD_ALIASES = {
     "latitude": ("centerlatitude", "centerlat", "latitude", "lat", "y"),
     "longitude": ("centerlongitude", "centerlon", "longitude", "lon", "lng", "x"),

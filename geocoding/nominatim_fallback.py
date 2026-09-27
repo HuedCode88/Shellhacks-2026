@@ -114,7 +114,7 @@ def main():
     )
     parser.add_argument(
         "--out",
-        default=str(script_dir / "gridlock_project_tables_geocoded_nominatim.xlsx"),
+        default=str(script_dir / "gridlock_project_tables_geocoded.xlsx"),
         help="New workbook to create",
     )
     parser.add_argument("--contact-email", required=True)

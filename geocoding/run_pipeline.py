@@ -73,7 +73,7 @@ def main():
                          help="Part 1 output workbook (raw project tables)")
     parser.add_argument(
         "--out",
-        default=str(script_dir.parent / "gridlock_project_tables_geocoded_nominatim (1).xlsx"),
+        default=str(script_dir.parent / "gridlock_project_tables_geocoded.xlsx"),
         help="Final geocoded workbook. Defaults to the exact filename AND location "
              "config.EXCEL_FILE already points at (the app's root directory, one "
              "level up from this geocoding/ package), so the app picks it up with "

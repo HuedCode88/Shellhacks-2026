@@ -17,17 +17,15 @@ from pypdf import PdfReader, PdfWriter
 
 from config import (
     ALLOWED_EXTENSIONS, GEMINI_MODEL, GEOCODES_PER_PROJECT_BUDGET,
-    MAX_ARCHIVE_UNCOMPRESSED_BYTES, MAX_CHUNKS_PER_UPLOAD, MAX_DOCUMENT_CHARS,
-    MAX_GEOCODES_HARD_CAP, MAX_PROJECTS_PER_UPLOAD, OVERPASS_BBOXES,
-    PDF_PAGES_PER_REQUEST, PDF_PAGE_OVERLAP, PROJECT_RESPONSE_SCHEMA
+    ICON_COLOR_HEX, MAX_ARCHIVE_UNCOMPRESSED_BYTES, MAX_CHUNKS_PER_UPLOAD,
+    MAX_DOCUMENT_CHARS, MAX_GEOCODES_HARD_CAP, MAX_PROJECTS_PER_UPLOAD,
+    OVERPASS_BBOXES, PDF_PAGES_PER_REQUEST, PDF_PAGE_OVERLAP,
+    PROJECT_RESPONSE_SCHEMA, EXCEL_FILE
 )
 from geocoding.geocode_match import extract_endpoints
 from geocoding.live_lookup import geocode_by_name
 from utils import safe_float, _clean_text, _normalise_field_name
 from database import get_source_color
-from utils import safe_float, _clean_text, _source_color, _normalise_field_name
-# add to the existing imports at the top of services.py
-from config import EXCEL_FILE
 from build_overlap_table import (
     load_desc_projects,
     load_gpc_projects,
@@ -105,7 +103,7 @@ def _add_overlap_lines(fmap, overlaps, project_lookup):
             color=OVERLAP_LINE_COLOR,
             weight=3,
             opacity=1.0,
-            tooltip=f"{desc_name} ↔ {gpc_name} | {overlap['distance_mi']} mi",
+            tooltip=f"{desc_name} \u2194 {gpc_name} | {overlap['distance_mi']} mi",
             popup=folium.Popup(popup_html, max_width=400),
         )
         highlight_line.add_to(overlap_layer)
@@ -166,7 +164,7 @@ def _add_overlap_ranking_panel(fmap, overlaps, project_lookup):
             <div style="display:flex;align-items:center;margin-bottom:5px;">
                 <span style="background:{color};color:white;border-radius:50%;width:25px;height:25px;
                     display:inline-flex;align-items:center;justify-content:center;font-weight:bold;margin-right:8px;">{rank}</span>
-                <strong>{escape(str(overlap['desc_id']))} ↔ {escape(str(overlap['gpc_id']))}</strong>
+                <strong>{escape(str(overlap['desc_id']))} \u2194 {escape(str(overlap['gpc_id']))}</strong>
             </div>
             <div style="font-size:12px;color:#444;margin-left:33px;">
                 <div><b>DESC:</b> {desc_name}</div>
@@ -185,7 +183,7 @@ def _add_overlap_ranking_panel(fmap, overlaps, project_lookup):
         <button id="overlap-toggle" onclick="toggleOverlapPanel()"
             style="background:#222;color:white;border:none;border-radius:6px;padding:11px 16px;
                    font-size:14px;font-weight:bold;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,0.35);">
-            ⚠ Project Overlaps ({len(overlaps)})
+            \u26a0 Project Overlaps ({len(overlaps)})
         </button>
         <div id="overlap-panel" style="display:none;width:400px;max-height:80vh;margin-top:8px;background:white;
                 border:2px solid #333;border-radius:8px;box-shadow:0 3px 15px rgba(0,0,0,0.35);overflow:hidden;">
@@ -205,10 +203,10 @@ def _add_overlap_ranking_panel(fmap, overlaps, project_lookup):
             var button = document.getElementById("overlap-toggle");
             if (panel.style.display === "none" || panel.style.display === "") {{
                 panel.style.display = "block";
-                button.innerHTML = "✕ Close Overlaps";
+                button.innerHTML = "\u2715 Close Overlaps";
             }} else {{
                 panel.style.display = "none";
-                button.innerHTML = "⚠ Project Overlaps ({len(overlaps)})";
+                button.innerHTML = "\u26a0 Project Overlaps ({len(overlaps)})";
             }}
         }}
         function focusOverlap(lat1, lon1, lat2, lon2, rank) {{
@@ -237,6 +235,20 @@ def _add_overlap_ranking_panel(fmap, overlaps, project_lookup):
     fmap.get_root().html.add_child(Element(panel_html))
 GEOCODING_LOCK = Lock()
 LAST_GEOCODE_AT = 0.0
+
+# Field names never worth showing in a project's map popup -- matched by
+# exact name (lowercased, whitespace-stripped), not by position, so this
+# doesn't depend on column order or on every field rendering correctly.
+_HIDDEN_POPUP_FIELDS = {
+    "name",              # already shown in the popup title
+    "geocoding method",  # our own internal bookkeeping, not project data
+    # Everything the batch geocoding pipeline (geocode_match.py) writes
+    # alongside the original project columns -- useful while building/
+    # debugging that pipeline, not for someone just viewing the map.
+    "endpoints_tried", "matched_endpoint_1", "osm_name_1", "lat_1", "lon_1",
+    "score_1", "matched_endpoint_2", "osm_name_2", "lat_2", "lon_2",
+    "score_2", "center_lat", "center_lon", "confidence", "match_method",
+}
 
 def _read_docx_text(content):
     namespace = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -793,6 +805,7 @@ def normalize_uploaded_projects(extracted, filename, utility_name=""):
         })
 
     return projects, skipped, geocode_count
+
 def _add_project_search(fmap, projects):
     from branca.element import Element
 
@@ -876,7 +889,7 @@ def _add_project_search(fmap, projects):
                 html += '<div class="project-search-result" onclick="focusProject(' + project.lat + ',' + project.lon + ')">' +
                     '<div class="project-search-id">' + safeId + '</div>' +
                     '<div class="project-search-name">' + safeName + '</div>' +
-                    '<div class="project-search-meta">' + safeSheet + (safeCategory ? " • " + safeCategory : "") + '</div>' +
+                    '<div class="project-search-meta">' + safeSheet + (safeCategory ? " \u2022 " + safeCategory : "") + '</div>' +
                 '</div>';
             }});
 
@@ -947,29 +960,39 @@ def build_map(projects):
         popup_html = f"<b>{escape(title)}</b><br>"
         popup_lines = []
         for field, value in p.get("fields", {}).items():
-            # Geocoding-pipeline internals (endpoints_tried onward:
-            # matched_endpoint_1, score_1, center_lat, confidence,
-            # match_method, etc.) come after the real project columns in
-            # the source workbook's column order -- useful while building
-            # the pipeline, not in a public popup, so stop here entirely.
-            if field.strip().lower() == "endpoints_tried":
-                break
-            if field.strip().lower() in ("geocoding method", "name"):
+            normalized_field = field.strip().lower()
+            # Fields never worth showing in a public popup: our own
+            # bookkeeping (name -- already in the title; geocoding method),
+            # a blank column name (whatever caused it, it's not useful),
+            # any "project name"-style column (also already in the
+            # title -- matched by substring since the exact wording
+            # varies, e.g. "Project Name / Endpoints (raw title)"), and
+            # every geocoding-pipeline-internal column the batch workbook
+            # pipeline writes (endpoints_tried onward). Blocked explicitly
+            # by name rather than "stop after the first match", so one
+            # field rendering with an unexpected label doesn't let
+            # everything after it slip through unfiltered.
+            if not normalized_field or normalized_field in _HIDDEN_POPUP_FIELDS:
+                continue
+            if "project name" in normalized_field:
                 continue
             if value is None or not str(value).strip():
                 continue
             display_value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
-            popup_lines.append(f"<b>{escape(str(field))}:</b> {escape(display_value)}")
+            popup_lines.append(f"<b>{escape(str(field).strip())}:</b> {escape(display_value)}")
         popup_html += "<br>".join(popup_lines)
 
-        folium.Marker(
+        folium.CircleMarker(
             location=[p["lat"], p["lon"]],
+            radius=6,
+            color=ICON_COLOR_HEX.get(p.get("color") or get_source_color(layer_name), "#2b2b2b"),
+            weight=1.5,
+            fill=True,
+            fill_opacity=0.85,
             tooltip=escape(title),
             popup=folium.Popup(popup_html, max_width=350),
-            icon=folium.Icon(color=p.get("color") or get_source_color(layer_name)),
         ).add_to(layers[layer_name])
 
-    folium.LayerControl(collapsed=False).add_to(fmap)
 
     try:
         overlaps = _load_workbook_overlaps()
@@ -982,4 +1005,5 @@ def build_map(projects):
         _add_overlap_lines(fmap, overlaps, project_lookup)
         _add_overlap_ranking_panel(fmap, overlaps, project_lookup)
 
+    folium.LayerControl(collapsed=False).add_to(fmap)
     return fmap.get_root().render()
