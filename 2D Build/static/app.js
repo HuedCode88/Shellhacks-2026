@@ -16,7 +16,23 @@ const drawerBackdrop = document.querySelector("#drawer-backdrop");
 const drawerClose = document.querySelector("#drawer-close");
 
 let totalCount = null;
+const viewToggle = document.getElementById('second-view');
 
+viewToggle.addEventListener('click', async () => {
+  viewToggle.disabled = true;
+  const originalText = viewToggle.textContent;
+  viewToggle.textContent = 'Launching…';
+
+  try {
+    const response = await fetch('/run-main?view=3D', { method: 'POST' });
+    if (!response.ok) throw new Error(`Server returned ${response.status}`);
+  } catch (err) {
+    console.error('Failed to launch 3D view:', err);
+  } finally {
+    viewToggle.disabled = false;
+    viewToggle.textContent = originalText;
+  }
+});
 mapFrame.addEventListener("load", () => {
   totalCount = mapFrame.contentDocument.querySelector("#total-count");
   refreshStatus();

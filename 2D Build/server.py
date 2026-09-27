@@ -1,10 +1,12 @@
 import json
+import sys
 import os
 import zipfile
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlparse, parse_qs
+import subprocess
 
 from config import APP_DIR, MAX_UPLOAD_BYTES
 from database import (
@@ -131,6 +133,16 @@ class ProjectMapHandler(BaseHTTPRequestHandler):
         self._send_bytes(200, "text/html; charset=utf-8", page)
 
     def do_POST(self):
+        parsed = urlparse(self.path)
+        if parsed.path == '/run-main':
+            project_dir = os.path.normpath(os.path.join(APP_DIR, "..", "3D Build"))
+            subprocess.Popen(
+                [sys.executable, 'main.py'],
+                cwd=project_dir
+            )
+            self._send_json(200, {"status": "launched"})
+            return
+
         if urlsplit(self.path).path != "/api/upload":
             self._send_json(404, {"error": "Not found."})
             return
