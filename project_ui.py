@@ -6,14 +6,16 @@ class ProjectInfoPanel:
     """Draws selected workbook project data as an in-window OpenGL overlay."""
 
     PANEL_SIZE = (500, 330)
+    DETAILS_SIZE = (760, 600)
     SEARCH_SIZE = (520, 250)
     RANKING_TAB_SIZE = (48, 72)
     PANEL_TAB_SIZE = (48, 72)
-    LAYER_SIZE = (250, 126)
+    LAYER_SIZE = (250, 158)
 
     def __init__(self, window_size):
         self.window_width, self.window_height = window_size
         self.surface = pygame.Surface(self.PANEL_SIZE, pygame.SRCALPHA)
+        self.details_surface = pygame.Surface(self.DETAILS_SIZE, pygame.SRCALPHA)
         self.ranking_surface = pygame.Surface(self.PANEL_SIZE, pygame.SRCALPHA)
         self.ranking_tab_surface = pygame.Surface(self.RANKING_TAB_SIZE, pygame.SRCALPHA)
         self.search_surface = pygame.Surface(self.SEARCH_SIZE, pygame.SRCALPHA)
@@ -24,6 +26,7 @@ class ProjectInfoPanel:
         self.body_font = pygame.font.Font(None, 20)
         self.small_font = pygame.font.Font(None, 17)
         self.texture_id = glGenTextures(1)
+        self.details_texture_id = glGenTextures(1)
         self.ranking_texture_id = glGenTextures(1)
         self.ranking_tab_texture_id = glGenTextures(1)
         self.search_texture_id = glGenTextures(1)
@@ -44,7 +47,9 @@ class ProjectInfoPanel:
         self.show_desc = True
         self.show_ga_its = True
         self.show_overlaps = True
+        self.show_domes = True
         self.panel_visible = True
+        self.details_expanded = False
         self.layer_visible = False
         self.overlap_count = 0
         self.overlap_lines_rendered = 0
@@ -54,6 +59,24 @@ class ProjectInfoPanel:
         if project is not self.selected_project:
             self.selected_project = project
             self.dirty = True
+
+    def expand_details(self):
+        self.details_expanded = True
+        self.dirty = True
+
+    def collapse_details(self):
+        self.details_expanded = False
+        self.dirty = True
+
+    def details_close_hit(self, position):
+        x, y = position
+        card_x = (self.window_width - self.DETAILS_SIZE[0]) // 2
+        card_y = (self.window_height - self.DETAILS_SIZE[1]) // 2
+        return (
+            self.details_expanded
+            and card_x + self.DETAILS_SIZE[0] - 56 <= x <= card_x + self.DETAILS_SIZE[0]
+            and card_y <= y <= card_y + 52
+        )
 
     def set_projects(self, projects):
         self.projects = projects
@@ -115,10 +138,11 @@ class ProjectInfoPanel:
             self.ranking_minimized = False
         self.dirty = True
 
-    def set_layers(self, show_desc, show_ga_its, show_overlaps):
+    def set_layers(self, show_desc, show_ga_its, show_overlaps, show_domes):
         self.show_desc = show_desc
         self.show_ga_its = show_ga_its
         self.show_overlaps = show_overlaps
+        self.show_domes = show_domes
         self.dirty = True
 
     def layer_at(self, position):
@@ -127,7 +151,7 @@ class ProjectInfoPanel:
         if self.search_active or not self.layer_visible or not (layer_x <= x <= layer_x + self.LAYER_SIZE[0] and layer_y <= y <= layer_y + self.LAYER_SIZE[1]):
             return None
         row = (y - layer_y - 26) // 32
-        return ("desc", "ga_its", "overlaps")[row] if 0 <= row < 3 else None
+        return ("desc", "ga_its", "overlaps", "domes")[row] if 0 <= row < 4 else None
 
     def layer_origin(self):
         return self.window_width - self.LAYER_SIZE[0], 366
@@ -233,6 +257,60 @@ class ProjectInfoPanel:
         while text and font.size(text + "...")[0] > width:
             text = text[:-1]
         return text + "..."
+
+    def _draw_wrapped(self, surface, text, x, y, width, font, color, line_height=22):
+        words = str(text).split()
+        line = ""
+        for word in words:
+            candidate = f"{line} {word}".strip()
+            if line and font.size(candidate)[0] > width:
+                surface.blit(font.render(line, True, color), (x, y))
+                y += line_height
+                line = word
+            else:
+                line = candidate
+        if line:
+            surface.blit(font.render(line, True, color), (x, y))
+            y += line_height
+        return y
+
+    def _render_details_expanded(self):
+        self.details_surface.fill((13, 20, 29, 248))
+        pygame.draw.rect(self.details_surface, (66, 190, 220, 255), self.details_surface.get_rect(), width=3, border_radius=8)
+        pygame.draw.rect(self.details_surface, (34, 48, 62, 255), (0, 0, self.DETAILS_SIZE[0], 48))
+        title = self._fit_text(self.selected_project["name"], self.title_font, 650)
+        self.details_surface.blit(self.title_font.render(title, True, (240, 248, 255)), (24, 13))
+        close = self.title_font.render("X", True, (235, 247, 255))
+        self.details_surface.blit(close, (self.DETAILS_SIZE[0] - 38, 10))
+
+        project = self.selected_project
+        lines = [
+            ("Source", project["sheet"]),
+            ("ID", project["id"] or "N/A"),
+            ("Category", project["category"]),
+            ("Coordinates", f"{project['lat']:.6f}, {project['lon']:.6f}"),
+        ]
+        lines.extend(project.get("details", {}).items())
+        y = 72
+        for label, value in lines:
+            self.details_surface.blit(self.body_font.render(f"{label}:", True, (120, 220, 240)), (24, y))
+            y = self._draw_wrapped(self.details_surface, value, 190, y, 540, self.body_font, (225, 235, 242)) + 5
+            if y > self.DETAILS_SIZE[1] - 150:
+                break
+
+        overlaps = sorted(project.get("overlaps", []), key=lambda overlap: overlap["distance_km"])
+        if overlaps and y <= self.DETAILS_SIZE[1] - 120:
+            y += 8
+            self.details_surface.blit(self.body_font.render("Coordination relationships", True, (240, 248, 255)), (24, y))
+            y += 28
+            for overlap in overlaps:
+                other = overlap["second"] if overlap["first"] is project else overlap["first"]
+                text = f"{other['id'] or other['name']} | {overlap['distance_km']} km | {overlap['geographic_tier']} | Timeline: {overlap['timeline_overlap'] or 'Unknown'}"
+                y = self._draw_wrapped(self.details_surface, text, 34, y, 680, self.small_font, (205, 220, 232), 18) + 3
+                if y > self.DETAILS_SIZE[1] - 35:
+                    break
+
+        self.details_surface.blit(self.small_font.render("Double-click another point to inspect it | Click > to close", True, (140, 170, 185)), (24, self.DETAILS_SIZE[1] - 24))
 
     def _render_panel(self):
         self.surface.fill((13, 20, 29, 238))
@@ -378,7 +456,7 @@ class ProjectInfoPanel:
                 break
 
         hint = self.small_font.render(
-            "R ranking | 1 DESC | 2 GA ITS | 3 overlap lines",
+            "R ranking | 1 DESC | 2 GA ITS | 3 lines | 4 domes",
             True,
             (132, 158, 174),
         )
@@ -447,7 +525,8 @@ class ProjectInfoPanel:
             self.small_font.render(
                 f"Layers: DESC {'ON' if self.show_desc else 'OFF'} | "
                 f"GA ITS {'ON' if self.show_ga_its else 'OFF'} | "
-                f"Lines {'ON' if self.show_overlaps else 'OFF'}",
+                f"Lines {'ON' if self.show_overlaps else 'OFF'} | "
+                f"Domes {'ON' if self.show_domes else 'OFF'}",
                 True,
                 (120, 240, 160),
             ),
@@ -455,7 +534,10 @@ class ProjectInfoPanel:
         )
 
     def _upload_texture(self):
-        self._render_panel()
+        if self.details_expanded and self.selected_project is not None:
+            self._render_details_expanded()
+        else:
+            self._render_panel()
         self._render_ranking_panel()
         self.ranking_tab_surface.fill((13, 20, 29, 245))
         pygame.draw.rect(self.ranking_tab_surface, (66, 190, 220, 255), self.ranking_tab_surface.get_rect(), width=2, border_radius=4)
@@ -473,6 +555,7 @@ class ProjectInfoPanel:
             ("DESC projects", self.show_desc, (40, 210, 110)),
             ("GA ITS projects", self.show_ga_its, (35, 150, 245)),
             ("Overlap lines", self.show_overlaps, (0, 220, 220)),
+            ("Overlap domes", self.show_domes, (255, 115, 0)),
         )
         for index, (label, enabled, color) in enumerate(layer_rows):
             y = 34 + index * 29
@@ -505,7 +588,10 @@ class ProjectInfoPanel:
                 row = f"{project['id'] or 'N/A'} | {project['name']} | {project['sheet']}"
                 self.search_surface.blit(self.small_font.render(self._fit_text(row, self.small_font, 470), True, (235, 245, 250)), (14, row_y + 5))
 
-        self._upload_surface(self.surface, self.texture_id)
+        if self.details_expanded and self.selected_project is not None:
+            self._upload_surface(self.details_surface, self.details_texture_id)
+        else:
+            self._upload_surface(self.surface, self.texture_id)
         self._upload_surface(self.ranking_surface, self.ranking_texture_id)
         self._upload_surface(self.ranking_tab_surface, self.ranking_tab_texture_id)
         self._upload_surface(self.search_surface, self.search_texture_id)
@@ -567,7 +653,12 @@ class ProjectInfoPanel:
 
         project_panel_y = self.window_height - panel_height - 24
         if self.panel_visible:
-            draw_texture(self.texture_id, panel_width, panel_height, 0, project_panel_y)
+            if self.details_expanded and self.selected_project is not None:
+                details_x = (self.window_width - self.DETAILS_SIZE[0]) // 2
+                details_y = (self.window_height - self.DETAILS_SIZE[1]) // 2
+                draw_texture(self.details_texture_id, *self.DETAILS_SIZE, details_x, details_y)
+            else:
+                draw_texture(self.texture_id, panel_width, panel_height, 0, project_panel_y)
         else:
             panel_tab_y = self.window_height - 24 - self.PANEL_TAB_SIZE[1]
             draw_texture(self.panel_tab_texture_id, *self.PANEL_TAB_SIZE, 0, panel_tab_y)
@@ -592,7 +683,7 @@ class ProjectInfoPanel:
 
     def close(self):
         glDeleteTextures([self.texture_id])
-        glDeleteTextures([self.ranking_texture_id, self.ranking_tab_texture_id, self.search_texture_id])
+        glDeleteTextures([self.details_texture_id, self.ranking_texture_id, self.ranking_tab_texture_id, self.search_texture_id])
         glDeleteTextures([self.layer_texture_id])
         glDeleteTextures([self.layer_tab_texture_id])
         glDeleteTextures([self.panel_tab_texture_id])
