@@ -47,7 +47,8 @@ TILE_CACHE_DIR = os.path.join(BASE_DIR, "map_tiles")
 
 MAX_TILE_GRID = 8
 
-FOCUSED_TILE_SPAN = 6
+FOCUSED_TILE_WIDTH = 8
+FOCUSED_TILE_HEIGHT = 8
 
 MONGO_TILE_WORKERS = 12
 
@@ -57,7 +58,7 @@ MAX_MEMORY_TILES = 300
 # always teleport straight to this zoom level rather than only
 # zooming in if the current zoom is shallower.
 TELEPORT_ZOOM = 10
-INITIAL_MAP_FOCUS = (30.0, -82.0)  # slightly north toward the Georgia border
+INITIAL_MAP_FOCUS = (30.5, -82.0)  # shift startup view north toward Georgia
 
 # Used only as a fallback when MongoDB doesn't have a tile yet.
 OSM_USER_AGENT = "Shellhacks-2026-3D-map/1.0 (local visualization)"
@@ -490,12 +491,13 @@ def calculate_tile_bounds(projects, zoom, focus=None):
         focus_x = math.floor(lon_to_tile_x(focus_lon, zoom))
         focus_y = math.floor(lat_to_tile_y(focus_lat, zoom))
 
-        half_span = FOCUSED_TILE_SPAN // 2
+        half_width = FOCUSED_TILE_WIDTH // 2
+        half_height = FOCUSED_TILE_HEIGHT // 2
 
-        min_x = max(0, focus_x - half_span)
-        max_x = min(tile_count - 1, min_x + FOCUSED_TILE_SPAN - 1)
-        min_y = max(0, focus_y - half_span)
-        max_y = min(tile_count - 1, min_y + FOCUSED_TILE_SPAN - 1)
+        min_x = max(0, focus_x - half_width)
+        max_x = min(tile_count - 1, min_x + FOCUSED_TILE_WIDTH - 1)
+        min_y = max(0, focus_y - half_height)
+        max_y = min(tile_count - 1, min_y + FOCUSED_TILE_HEIGHT - 1)
 
     return min_x, max_x, min_y, max_y
 
@@ -1041,7 +1043,7 @@ def main(preload=False):
     # Camera
     # --------------------------------------------------------
 
-    camera_distance = max(240.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
+    camera_distance = max(420.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
     camera_rotation_x = 90.0
     camera_rotation_y = 0.0
     camera_offset_x = 0.0

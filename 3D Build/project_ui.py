@@ -174,13 +174,13 @@ class ProjectInfoPanel:
 
     def panel_button_hit(self, position):
         panel_x = 0
-        panel_y = self.window_height - self.PANEL_SIZE[1] - 24
+        panel_y = self.window_height - self.PANEL_SIZE[1]
         if self.panel_visible:
             return (
                 panel_x + self.PANEL_SIZE[0] - 44 <= position[0] <= panel_x + self.PANEL_SIZE[0]
                 and panel_y <= position[1] <= panel_y + 44
             )
-        tab_y = self.window_height - 24 - self.PANEL_TAB_SIZE[1]
+        tab_y = self.window_height - self.PANEL_TAB_SIZE[1]
         return panel_x <= position[0] <= panel_x + self.PANEL_TAB_SIZE[0] and tab_y <= position[1] <= tab_y + self.PANEL_TAB_SIZE[1]
 
     def begin_search(self):
@@ -651,7 +651,7 @@ class ProjectInfoPanel:
             glTexCoord2f(0, 0); glVertex2f(x, y + height)
             glEnd()
 
-        project_panel_y = self.window_height - panel_height - 24
+        project_panel_y = self.window_height - panel_height
         if self.panel_visible:
             if self.details_expanded and self.selected_project is not None:
                 details_x = (self.window_width - self.DETAILS_SIZE[0]) // 2
