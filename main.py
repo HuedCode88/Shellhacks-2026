@@ -3,38 +3,135 @@
 import math
 import os
 import argparse
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 
+import gridfs
 import openpyxl
 import pygame
 import requests
+from dotenv import load_dotenv
 from OpenGL.GL import *
 from OpenGL.GLU import *
 from PIL import Image
 from pygame.locals import DOUBLEBUF, FULLSCREEN, OPENGL
+from pymongo import MongoClient
+
 from overlap_logic import build_project_overlaps
 from project_ui import ProjectInfoPanel
 
 
+# ============================================================
+# CONFIG
+# ============================================================
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-EXCEL_FILE = os.path.join(BASE_DIR, "gridlock_project_tables_geocoded.xlsx")
+
+EXCEL_FILE = os.path.join(
+    BASE_DIR,
+    "gridlock_project_tables_geocoded_nominatim.xlsx",
+)
+
 WINDOW_SIZE = (1200, 800)
+
 TILE_ZOOM = 8
+
 MAX_DETAIL_ZOOM = 17
+MIN_DETAIL_ZOOM = 2
+
 TILE_SIZE = 256
-WORLD_UNITS_PER_TILE = 60.0
+
 MAX_TILE_GRID = 8
-FOCUSED_TILE_SPAN = 8
+
+FOCUSED_TILE_SPAN = 6
+
+MONGO_TILE_WORKERS = 12
+
+MAX_MEMORY_TILES = 300
+
+# When focusing on a project (search result, ranking click, etc.),
+# always teleport straight to this zoom level rather than only
+# zooming in if the current zoom is shallower.
 TELEPORT_ZOOM = 10
+
+# Used only as a fallback when MongoDB doesn't have a tile yet.
 OSM_USER_AGENT = "Shellhacks-2026-3D-map/1.0 (local visualization)"
-TILE_CACHE = {}
-TILE_CACHE_DIR = os.path.join(BASE_DIR, "map_tiles")
+
+
+# ============================================================
+# MONGODB
+# ============================================================
+
+load_dotenv()
+
+MONGO_DB_NAME = "map"
+MONGO_BUCKET_NAME = "images"
+
+MONGO_CLIENT = MongoClient(
+    os.getenv("MONGODB_URI"),
+    maxPoolSize=MONGO_TILE_WORKERS + 4,
+)
+
+MONGO_DB = MONGO_CLIENT[MONGO_DB_NAME]
+
+TILE_FS = gridfs.GridFS(
+    MONGO_DB,
+    collection=MONGO_BUCKET_NAME,
+)
+
+# GridFS doesn't index metadata fields by default, so without this,
+# every tile lookup below collection-scans images.files. create_index
+# is a cheap no-op if the index already exists.
+MONGO_DB[f"{MONGO_BUCKET_NAME}.files"].create_index(
+    [("metadata.z", 1), ("metadata.x", 1), ("metadata.y", 1)]
+)
+
+
+# ============================================================
+# IN-MEMORY TILE CACHE
+# ============================================================
+
+TILE_MEMORY_CACHE = {}
+
+TILE_CACHE_LOCK = threading.Lock()
+
+
+def get_cached_tile(cache_key):
+
+    with TILE_CACHE_LOCK:
+        return TILE_MEMORY_CACHE.get(cache_key)
+
+
+def cache_tile(cache_key, image):
+
+    with TILE_CACHE_LOCK:
+
+        TILE_MEMORY_CACHE[cache_key] = image
+
+        while (
+            len(TILE_MEMORY_CACHE)
+            > MAX_MEMORY_TILES
+        ):
+
+            oldest_key = next(
+                iter(TILE_MEMORY_CACHE)
+            )
+
+            del TILE_MEMORY_CACHE[
+                oldest_key
+            ]
+
+
+# ============================================================
+# PROJECT DATA
+# ============================================================
 
 SHEET_CATEGORY_FIELD = {
     "DESC Geocoded": "Status",
     "GA ITS Geocoded": "Sponsor (GPC/GTC/MEAG/DU/SAV)",
 }
+
 
 CATEGORY_COLORS = {
     ("DESC Geocoded", "In Progress"): (0.1, 0.85, 0.3),
@@ -48,36 +145,49 @@ CATEGORY_COLORS = {
 
 
 def safe_float(value):
+
     if value is None:
         return None
+
     try:
         return float(value)
+
     except (TypeError, ValueError):
         return None
 
 
 def load_projects(path):
+
     workbook = openpyxl.load_workbook(path, data_only=True, read_only=True)
+
     projects = []
 
     for sheet_name, category_field in SHEET_CATEGORY_FIELD.items():
+
         if sheet_name not in workbook.sheetnames:
             continue
 
         rows = workbook[sheet_name].iter_rows(values_only=True)
+
         header = next(rows, None)
+
         if not header:
             continue
 
         for row in rows:
+
             record = dict(zip(header, row))
+
             latitude = safe_float(record.get("center_lat"))
             longitude = safe_float(record.get("center_lon"))
+
             if latitude is None or longitude is None:
                 continue
 
             category = record.get(category_field)
+
             project_id = record.get("Project ID") or record.get("TEAMS Number")
+
             detail_fields = (
                 "Status",
                 "Description",
@@ -96,11 +206,13 @@ def load_projects(path):
                 "score_1",
                 "score_2",
             )
+
             details = {
                 field: record[field]
                 for field in detail_fields
                 if record.get(field) is not None and str(record[field]).strip()
             }
+
             projects.append({
                 "sheet": sheet_name,
                 "id": project_id,
@@ -108,10 +220,7 @@ def load_projects(path):
                 "category": category or "Uncategorized",
                 "lat": latitude,
                 "lon": longitude,
-                "color": CATEGORY_COLORS.get(
-                    (sheet_name, category),
-                    (0.95, 0.9, 0.1),
-                ),
+                "color": CATEGORY_COLORS.get((sheet_name, category), (0.95, 0.9, 0.1)),
                 "details": details,
                 "date_field": (
                     "Planned In-Service Date"
@@ -122,9 +231,15 @@ def load_projects(path):
 
     if not projects:
         raise ValueError("No geocoded projects with center_lat/center_lon were found.")
+
     build_project_overlaps(projects)
+
     return projects
 
+
+# ============================================================
+# TILE / GEOGRAPHY CONVERSION
+# ============================================================
 
 def lon_to_tile_x(longitude, zoom):
     return (longitude + 180.0) / 360.0 * (2 ** zoom)
@@ -133,7 +248,7 @@ def lon_to_tile_x(longitude, zoom):
 def lat_to_tile_y(latitude, zoom):
     latitude = max(-85.05112878, min(85.05112878, latitude))
     radians = math.radians(latitude)
-    return (1.0 - math.asinh(math.tan(radians)) / math.pi) / 2.0 * (2 ** zoom)
+    return (1.0 - (math.asinh(math.tan(radians)) / math.pi)) / 2.0 * (2 ** zoom)
 
 
 def tile_x_to_lon(tile_x, zoom):
@@ -141,138 +256,319 @@ def tile_x_to_lon(tile_x, zoom):
 
 
 def tile_y_to_lat(tile_y, zoom):
-    value = math.pi * (1.0 - 2.0 * tile_y / (2 ** zoom))
+    value = math.pi * (1.0 - (2.0 * tile_y / (2 ** zoom)))
     return math.degrees(math.atan(math.sinh(value)))
 
 
 def choose_tile_zoom(projects):
-    """Choose the highest zoom that keeps every project in the tile mosaic."""
+
     min_lat = min(project["lat"] for project in projects)
     max_lat = max(project["lat"] for project in projects)
     min_lon = min(project["lon"] for project in projects)
     max_lon = max(project["lon"] for project in projects)
 
     for zoom in range(8, 1, -1):
-        tile_width = math.floor(lon_to_tile_x(max_lon, zoom)) - math.floor(lon_to_tile_x(min_lon, zoom)) + 3
-        tile_height = math.floor(lat_to_tile_y(min_lat, zoom)) - math.floor(lat_to_tile_y(max_lat, zoom)) + 3
+
+        tile_width = (
+            math.floor(lon_to_tile_x(max_lon, zoom))
+            - math.floor(lon_to_tile_x(min_lon, zoom))
+            + 3
+        )
+
+        tile_height = (
+            math.floor(lat_to_tile_y(min_lat, zoom))
+            - math.floor(lat_to_tile_y(max_lat, zoom))
+            + 3
+        )
+
         if tile_width <= MAX_TILE_GRID and tile_height <= MAX_TILE_GRID:
             return zoom
 
     return 2
 
 
-def download_map_texture(projects, zoom=None, focus=None):
-    """Download nearby OSM tiles and return a texture plus geographic bounds."""
-    global TILE_ZOOM
-    TILE_ZOOM = zoom if zoom is not None else choose_tile_zoom(projects)
-    print(f"Using OpenStreetMap zoom level {TILE_ZOOM} for the current view.")
+# ============================================================
+# MONGODB TILE LOADING (with OSM fallback + write-back)
+# ============================================================
 
-    min_lat = min(project["lat"] for project in projects)
-    max_lat = max(project["lat"] for project in projects)
-    min_lon = min(project["lon"] for project in projects)
-    max_lon = max(project["lon"] for project in projects)
+def download_tile_from_osm(zoom, tile_x, tile_y):
+    """
+    Fetches one tile from the public OSM tile server. Used only when
+    MongoDB doesn't have this tile yet. Returns raw PNG bytes, or
+    None if the download failed.
+    """
+    url = f"https://tile.openstreetmap.org/{zoom}/{tile_x}/{tile_y}.png"
 
-    if focus is None:
-        center_lat = (min_lat + max_lat) / 2.0
-        center_lon = (min_lon + max_lon) / 2.0
-    else:
-        center_lat, center_lon = focus
-    center_x = lon_to_tile_x(center_lon, TILE_ZOOM)
-    center_y = lat_to_tile_y(center_lat, TILE_ZOOM)
-    tile_count = 2 ** TILE_ZOOM
-
-    if zoom is None or TILE_ZOOM <= choose_tile_zoom(projects):
-        min_x = max(0, math.floor(lon_to_tile_x(min_lon, TILE_ZOOM)) - 1)
-        max_x = min(tile_count - 1, math.floor(lon_to_tile_x(max_lon, TILE_ZOOM)) + 1)
-        min_y = max(0, math.floor(lat_to_tile_y(max_lat, TILE_ZOOM)) - 1)
-        max_y = min(tile_count - 1, math.floor(lat_to_tile_y(min_lat, TILE_ZOOM)) + 1)
-    else:
-        tile_span = FOCUSED_TILE_SPAN
-        focus_tile_x = math.floor(center_x)
-        focus_tile_y = math.floor(center_y)
-        min_x = max(0, focus_tile_x - tile_span // 2)
-        max_x = min(tile_count - 1, min_x + tile_span - 1)
-        min_y = max(0, focus_tile_y - tile_span // 2)
-        max_y = min(tile_count - 1, min_y + tile_span - 1)
-
-    center_x = (min_x + max_x + 1) / 2.0
-    center_y = (min_y + max_y + 1) / 2.0
-
-    texture_image = Image.new(
-        "RGB",
-        ((max_x - min_x + 1) * TILE_SIZE, (max_y - min_y + 1) * TILE_SIZE),
-        (45, 52, 58),
-    )
-    def fetch_tile(tile_coordinates):
-        tile_x, tile_y = tile_coordinates
-        cache_key = (TILE_ZOOM, tile_x, tile_y)
-        if cache_key in TILE_CACHE:
-            return tile_coordinates, TILE_CACHE[cache_key]
-
-        tile_path = os.path.join(
-            TILE_CACHE_DIR,
-            str(TILE_ZOOM),
-            str(tile_x),
-            f"{tile_y}.png",
+    try:
+        response = requests.get(
+            url,
+            headers={"User-Agent": OSM_USER_AGENT},
+            timeout=15,
         )
-        try:
-            with open(tile_path, "rb") as tile_file:
-                tile = Image.open(tile_file).convert("RGB")
-                TILE_CACHE[cache_key] = tile
-                return tile_coordinates, tile
-        except (FileNotFoundError, OSError):
-            pass
+        response.raise_for_status()
+        return response.content
+    except requests.RequestException as error:
+        print(f"OSM fallback download failed z={zoom} x={tile_x} y={tile_y}: {error}")
+        return None
 
-        url = f"https://tile.openstreetmap.org/{TILE_ZOOM}/{tile_x}/{tile_y}.png"
-        try:
-            response = requests.get(
-                url,
-                headers={"User-Agent": OSM_USER_AGENT},
-                timeout=15,
-            )
-            response.raise_for_status()
-            os.makedirs(os.path.dirname(tile_path), exist_ok=True)
-            with open(tile_path, "wb") as tile_file:
-                tile_file.write(response.content)
-            tile = Image.open(BytesIO(response.content)).convert("RGB")
-            TILE_CACHE[cache_key] = tile
-            return tile_coordinates, tile
-        except requests.RequestException as error:
-            print(f"Could not download map tile: {error}")
-            return tile_coordinates, None
 
-    tile_coordinates = [
+def upload_tile_to_mongo(zoom, tile_x, tile_y, image_bytes):
+    """
+    Write-through cache: saves a freshly OSM-fetched tile into GridFS
+    so this exact tile never needs OSM again -- everything ends up
+    living in MongoDB over time, with no physical map_tiles folder.
+    """
+    try:
+        TILE_FS.put(
+            image_bytes,
+            filename=f"{zoom}_{tile_x}_{tile_y}.png",
+            contentType="image/png",
+            metadata={
+                "z": zoom,
+                "x": tile_x,
+                "y": tile_y,
+                "source": "osm_fallback",
+            },
+        )
+    except Exception as error:
+        print(f"Could not save tile z={zoom} x={tile_x} y={tile_y} to MongoDB: {error}")
+
+
+def fetch_tiles_with_fallback(zoom, min_x, max_x, min_y, max_y):
+    """
+    Ensures every tile in this z/x/y rectangle is in the in-memory
+    cache. MongoDB is checked first with ONE batched query for the
+    whole rectangle (fast, indexed). Any tile MongoDB doesn't have
+    falls back to a direct OSM download, and that result is written
+    back into MongoDB so the gap doesn't need filling again.
+    """
+
+    needed = [
         (tile_x, tile_y)
         for tile_x in range(min_x, max_x + 1)
         for tile_y in range(min_y, max_y + 1)
     ]
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        for (tile_x, tile_y), tile in executor.map(fetch_tile, tile_coordinates):
-            if tile is not None:
-                texture_image.paste(
-                    tile,
-                    ((tile_x - min_x) * TILE_SIZE, (tile_y - min_y) * TILE_SIZE),
+
+    uncached = [
+        coordinates for coordinates in needed
+        if get_cached_tile((zoom, *coordinates)) is None
+    ]
+
+    if not uncached:
+        return
+
+    metadata_cursor = TILE_FS.find({
+        "metadata.z": zoom,
+        "metadata.x": {"$gte": min_x, "$lte": max_x},
+        "metadata.y": {"$gte": min_y, "$lte": max_y},
+    })
+
+    grid_out_by_coordinate = {
+        (grid_out.metadata["x"], grid_out.metadata["y"]): grid_out
+        for grid_out in metadata_cursor
+    }
+
+    def read_tile(coordinates):
+        tile_x, tile_y = coordinates
+        grid_out = grid_out_by_coordinate.get(coordinates)
+
+        if grid_out is not None:
+            try:
+                image = Image.open(BytesIO(grid_out.read())).convert("RGB")
+                cache_tile((zoom, *coordinates), image)
+                return
+            except Exception as error:
+                print(
+                    "MongoDB tile decode error "
+                    f"z={zoom} x={tile_x} y={tile_y}: {error} -- falling back to OSM"
                 )
+
+        # Not in MongoDB (or unreadable) -- fall back to OSM, then
+        # write it back so it's covered by MongoDB from now on.
+        image_bytes = download_tile_from_osm(zoom, tile_x, tile_y)
+
+        if image_bytes is None:
+            return
+
+        try:
+            image = Image.open(BytesIO(image_bytes)).convert("RGB")
+        except OSError as error:
+            print(f"Could not decode OSM tile z={zoom} x={tile_x} y={tile_y}: {error}")
+            return
+
+        cache_tile((zoom, *coordinates), image)
+        upload_tile_to_mongo(zoom, tile_x, tile_y, image_bytes)
+
+    with ThreadPoolExecutor(max_workers=MONGO_TILE_WORKERS) as executor:
+        list(executor.map(read_tile, uncached))
+
+
+def calculate_tile_bounds(projects, zoom, focus=None):
+
+    tile_count = 2 ** zoom
+
+    if focus is None:
+
+        min_lat = min(project["lat"] for project in projects)
+        max_lat = max(project["lat"] for project in projects)
+        min_lon = min(project["lon"] for project in projects)
+        max_lon = max(project["lon"] for project in projects)
+
+        min_x = max(0, math.floor(lon_to_tile_x(min_lon, zoom)) - 1)
+        max_x = min(tile_count - 1, math.floor(lon_to_tile_x(max_lon, zoom)) + 1)
+        min_y = max(0, math.floor(lat_to_tile_y(max_lat, zoom)) - 1)
+        max_y = min(tile_count - 1, math.floor(lat_to_tile_y(min_lat, zoom)) + 1)
+
+    else:
+
+        focus_lat, focus_lon = focus
+
+        focus_x = math.floor(lon_to_tile_x(focus_lon, zoom))
+        focus_y = math.floor(lat_to_tile_y(focus_lat, zoom))
+
+        half_span = FOCUSED_TILE_SPAN // 2
+
+        min_x = max(0, focus_x - half_span)
+        max_x = min(tile_count - 1, min_x + FOCUSED_TILE_SPAN - 1)
+        min_y = max(0, focus_y - half_span)
+        max_y = min(tile_count - 1, min_y + FOCUSED_TILE_SPAN - 1)
+
+    return min_x, max_x, min_y, max_y
+
+
+def build_texture_image(projects, zoom, focus=None):
+
+    min_x, max_x, min_y, max_y = calculate_tile_bounds(projects, zoom, focus)
+
+    width_tiles = max_x - min_x + 1
+    height_tiles = max_y - min_y + 1
+
+    texture_image = Image.new(
+        "RGB",
+        (width_tiles * TILE_SIZE, height_tiles * TILE_SIZE),
+        (45, 52, 58),
+    )
+
+    coordinates = [
+        (tile_x, tile_y)
+        for tile_x in range(min_x, max_x + 1)
+        for tile_y in range(min_y, max_y + 1)
+    ]
+
+    fetch_tiles_with_fallback(zoom, min_x, max_x, min_y, max_y)
+
+    for tile_x, tile_y in coordinates:
+
+        tile = get_cached_tile((zoom, tile_x, tile_y))
+
+        if tile is None:
+            continue
+
+        texture_image.paste(
+            tile,
+            ((tile_x - min_x) * TILE_SIZE, (tile_y - min_y) * TILE_SIZE),
+        )
+
+    center_x = (min_x + max_x + 1) / 2.0
+    center_y = (min_y + max_y + 1) / 2.0
 
     return texture_image, min_x, min_y, center_x, center_y
 
 
-def preload_map(projects):
-    """Persist the base view and detail zoom levels before opening the viewer."""
-    base_zoom = choose_tile_zoom(projects)
-    print(f"Preloading map tiles into {TILE_CACHE_DIR}...")
-    download_map_texture(projects, zoom=base_zoom)
-    min_lat = min(project["lat"] for project in projects)
-    max_lat = max(project["lat"] for project in projects)
-    min_lon = min(project["lon"] for project in projects)
-    max_lon = max(project["lon"] for project in projects)
-    focus = ((min_lat + max_lat) / 2.0, (min_lon + max_lon) / 2.0)
-    for zoom in range(base_zoom + 1, MAX_DETAIL_ZOOM + 1):
-        download_map_texture(projects, zoom=zoom, focus=focus)
-    print("Map preload complete. Future launches will use the local tile cache.")
+# ============================================================
+# ASYNCHRONOUS MAP LOADER
+# ============================================================
 
+class AsyncMapLoader:
+
+    def __init__(self, projects):
+
+        self.projects = projects
+        self.executor = ThreadPoolExecutor(max_workers=1)
+        self.lock = threading.Lock()
+        self.future = None
+        self.future_generation = 0
+        self.future_zoom = None
+        self.request_generation = 0
+        self.pending_request = None
+
+    def request(self, zoom, focus=None):
+
+        with self.lock:
+
+            self.request_generation += 1
+            generation = self.request_generation
+
+            # Always retain only the newest request.
+            self.pending_request = (generation, zoom, focus)
+
+            if self.future is None:
+                self._start_pending_locked()
+
+    def _start_pending_locked(self):
+
+        if self.future is not None:
+            return
+
+        if self.pending_request is None:
+            return
+
+        generation, zoom, focus = self.pending_request
+        self.pending_request = None
+
+        self.future_generation = generation
+        self.future_zoom = zoom
+
+        self.future = self.executor.submit(
+            build_texture_image,
+            self.projects,
+            zoom,
+            focus,
+        )
+
+    def poll(self):
+
+        with self.lock:
+
+            if self.future is None:
+                return None
+
+            if not self.future.done():
+                return None
+
+            future = self.future
+            generation = self.future_generation
+            zoom = self.future_zoom
+
+            self.future = None
+            self.future_zoom = None
+
+            try:
+                result = future.result()
+            except Exception as error:
+                print(f"Background MongoDB map load failed: {error}")
+                self._start_pending_locked()
+                return None
+
+            # Ignore stale results.
+            if generation != self.request_generation:
+                self._start_pending_locked()
+                return None
+
+            self._start_pending_locked()
+
+            return zoom, result
+
+    def close(self):
+        self.executor.shutdown(wait=False, cancel_futures=True)
+
+
+# ============================================================
+# OPENGL TEXTURE
+# ============================================================
 
 def make_texture(image):
+
     texture_id = glGenTextures(1)
     glBindTexture(GL_TEXTURE_2D, texture_id)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR)
@@ -280,20 +576,20 @@ def make_texture(image):
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE)
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE)
     glTexImage2D(
-        GL_TEXTURE_2D,
-        0,
-        GL_RGB,
-        image.width,
-        image.height,
-        0,
-        GL_RGB,
-        GL_UNSIGNED_BYTE,
-        image.tobytes(),
+        GL_TEXTURE_2D, 0, GL_RGB, image.width, image.height, 0,
+        GL_RGB, GL_UNSIGNED_BYTE, image.tobytes(),
     )
+    glBindTexture(GL_TEXTURE_2D, 0)
+
     return texture_id
 
 
+# ============================================================
+# OPENGL SETUP
+# ============================================================
+
 def setup_opengl(width, height):
+
     glClearColor(0.035, 0.05, 0.07, 1.0)
     glViewport(0, 0, width, height)
     glMatrixMode(GL_PROJECTION)
@@ -305,11 +601,16 @@ def setup_opengl(width, height):
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
 
 
+# ============================================================
+# MAP FLOOR
+# ============================================================
+
 def draw_floor(texture_id, image, min_x, min_y, center_x, center_y):
-    world_width = image.width / TILE_SIZE * WORLD_UNITS_PER_TILE
-    world_depth = image.height / TILE_SIZE * WORLD_UNITS_PER_TILE
-    floor_x = (min_x - center_x) * WORLD_UNITS_PER_TILE
-    floor_z = (min_y - center_y) * WORLD_UNITS_PER_TILE
+
+    world_width = image.width / TILE_SIZE * 40.0
+    world_depth = image.height / TILE_SIZE * 40.0
+    floor_x = (min_x - center_x) * 40.0
+    floor_z = (min_y - center_y) * 40.0
 
     glEnable(GL_TEXTURE_2D)
     glBindTexture(GL_TEXTURE_2D, texture_id)
@@ -327,43 +628,74 @@ def draw_floor(texture_id, image, min_x, min_y, center_x, center_y):
     glDisable(GL_TEXTURE_2D)
 
 
-def project_position(project, center_x, center_y):
+# ============================================================
+# PROJECT POSITION
+# ============================================================
+
+def project_position(project, center_x, center_y, zoom=None):
+
+    if zoom is None:
+        zoom = TILE_ZOOM
+
     return (
-        (lon_to_tile_x(project["lon"], TILE_ZOOM) - center_x) * WORLD_UNITS_PER_TILE,
-        (lat_to_tile_y(project["lat"], TILE_ZOOM) - center_y) * WORLD_UNITS_PER_TILE,
+        (lon_to_tile_x(project["lon"], zoom) - center_x) * 40.0,
+        (lat_to_tile_y(project["lat"], zoom) - center_y) * 40.0,
     )
 
 
-def project_is_visible(project, min_x, max_x, min_y, max_y):
-    project_x = lon_to_tile_x(project["lon"], TILE_ZOOM)
-    project_y = lat_to_tile_y(project["lat"], TILE_ZOOM)
+def project_is_visible(project, min_x, max_x, min_y, max_y, zoom=None):
+
+    if zoom is None:
+        zoom = TILE_ZOOM
+
+    project_x = lon_to_tile_x(project["lon"], zoom)
+    project_y = lat_to_tile_y(project["lat"], zoom)
+
     return min_x <= project_x <= max_x + 1 and min_y <= project_y <= max_y + 1
 
 
-def map_point_under_mouse(mouse_position, center_x, center_y):
-    """Return map-local coordinates and geographic coordinates under the cursor."""
+# ============================================================
+# MOUSE -> MAP
+# ============================================================
+
+def map_point_under_mouse(mouse_position, center_x, center_y, zoom):
+
     viewport = glGetIntegerv(GL_VIEWPORT)
     mouse_x, mouse_y = mouse_position
     mouse_y = viewport[3] - mouse_y
+
     modelview = glGetDoublev(GL_MODELVIEW_MATRIX)
     projection = glGetDoublev(GL_PROJECTION_MATRIX)
+
     near_point = gluUnProject(mouse_x, mouse_y, 0.0, modelview, projection, viewport)
     far_point = gluUnProject(mouse_x, mouse_y, 1.0, modelview, projection, viewport)
+
     ray_y = far_point[1] - near_point[1]
+
     if abs(ray_y) < 1e-9:
         return None
+
     fraction = -near_point[1] / ray_y
+
     map_x = near_point[0] + fraction * (far_point[0] - near_point[0])
     map_z = near_point[2] + fraction * (far_point[2] - near_point[2])
-    tile_x = center_x + map_x / WORLD_UNITS_PER_TILE
-    tile_y = center_y + map_z / WORLD_UNITS_PER_TILE
-    return map_x, map_z, tile_y_to_lat(tile_y, TILE_ZOOM), tile_x_to_lon(tile_x, TILE_ZOOM)
+
+    tile_x = center_x + map_x / 40.0
+    tile_y = center_y + map_z / 40.0
+
+    return map_x, map_z, tile_y_to_lat(tile_y, zoom), tile_x_to_lon(tile_x, zoom)
 
 
-def draw_marker(project, center_x, center_y, quadric, selected=False):
-    x, z = project_position(project, center_x, center_y)
+# ============================================================
+# PROJECT MARKER
+# ============================================================
+
+def draw_marker(project, center_x, center_y, quadric, zoom, selected=False):
+
+    x, z = project_position(project, center_x, center_y, zoom)
     red, green, blue = project["color"]
     marker_radius = 1.8 if selected else 1.2
+
     glColor3f(red, green, blue)
     glPushMatrix()
     glTranslatef(x, marker_radius, z)
@@ -375,29 +707,41 @@ def draw_marker(project, center_x, center_y, quadric, selected=False):
     glEnd()
 
 
-def pick_project(projects, click_position, center_x, center_y, show_desc=True, show_ga_its=True):
-    """Return the closest marker under a screen-space click."""
+# ============================================================
+# PROJECT PICKING
+# ============================================================
+
+def pick_project(projects, click_position, center_x, center_y, zoom, show_desc=True, show_ga_its=True):
+
     viewport = glGetIntegerv(GL_VIEWPORT)
     window_height = viewport[3]
     click_x, click_y = click_position
     click_y = window_height - click_y
+
     closest_project = None
     closest_distance = 18.0
 
     for project in projects:
+
         if project["sheet"] == "DESC Geocoded" and not show_desc:
             continue
         if project["sheet"] == "GA ITS Geocoded" and not show_ga_its:
             continue
-        x, z = project_position(project, center_x, center_y)
+
+        x, z = project_position(project, center_x, center_y, zoom)
         screen_x, screen_y, depth = gluProject(x, 1.2, z)
         distance = math.hypot(screen_x - click_x, screen_y - click_y)
+
         if 0.0 <= depth <= 1.0 and distance < closest_distance:
             closest_project = project
             closest_distance = distance
 
     return closest_project
 
+
+# ============================================================
+# PROJECT DESCRIPTION
+# ============================================================
 
 def describe_project(project):
     return (
@@ -408,7 +752,12 @@ def describe_project(project):
     )
 
 
+# ============================================================
+# AXES
+# ============================================================
+
 def draw_axes(length):
+
     glLineWidth(2.0)
     glBegin(GL_LINES)
     glColor3f(1.0, 0.1, 0.1)
@@ -423,41 +772,94 @@ def draw_axes(length):
     glEnd()
 
 
-def draw_overlap_lines(overlaps, center_x, center_y, min_x, max_x, min_y, max_y, selected_project=None):
-    """Render the 2D mockup's cross-project relationships on the 3D floor."""
+# ============================================================
+# OVERLAP LINES
+# ============================================================
+
+def draw_overlap_lines(overlaps, center_x, center_y, zoom, selected_project=None):
+
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_LINE_BIT | GL_DEPTH_BUFFER_BIT)
     glDisable(GL_DEPTH_TEST)
     glDisable(GL_TEXTURE_2D)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
-    glLineWidth(4.0)
+
     rendered_lines = 0
+
     for overlap in overlaps:
-        if not (
-            project_is_visible(overlap["first"], min_x, max_x, min_y, max_y)
-            and project_is_visible(overlap["second"], min_x, max_x, min_y, max_y)
-        ):
-            continue
-        first_x, first_z = project_position(overlap["first"], center_x, center_y)
-        second_x, second_z = project_position(overlap["second"], center_x, center_y)
+
+        first_x, first_z = project_position(overlap["first"], center_x, center_y, zoom)
+        second_x, second_z = project_position(overlap["second"], center_x, center_y, zoom)
+
         is_selected = selected_project in (overlap["first"], overlap["second"])
-        red, green, blue = overlap["color"]
-        glColor4f(red, green, blue, 0.95 if is_selected else 0.65)
+
         if is_selected:
-            glLineWidth(7.0)
+            red, green, blue = (1.0, 0.95, 0.15)
+            line_width = 7.0
+            alpha = 0.95
+        else:
+            red, green, blue = overlap["color"]
+            line_width = 4.0
+            alpha = 0.65
+
+        glLineWidth(line_width)
+        glColor4f(red, green, blue, alpha)
         glBegin(GL_LINES)
         glVertex3f(first_x, 0.12, first_z)
         glVertex3f(second_x, 0.12, second_z)
         glEnd()
+
         rendered_lines += 1
+
     glPopAttrib()
+
     return rendered_lines
 
 
+# ============================================================
+# CACHE VISIBLE PROJECTS
+# ============================================================
+
+def calculate_visible_projects(projects, min_x, max_x, min_y, max_y, zoom):
+    return [
+        project
+        for project in projects
+        if project_is_visible(project, min_x, max_x, min_y, max_y, zoom)
+    ]
+
+
+def calculate_visible_overlaps(overlaps, min_x, max_x, min_y, max_y, zoom):
+
+    visible = []
+
+    for overlap in overlaps:
+
+        if not project_is_visible(overlap["first"], min_x, max_x, min_y, max_y, zoom):
+            continue
+
+        if project_is_visible(overlap["second"], min_x, max_x, min_y, max_y, zoom):
+            visible.append(overlap)
+
+    return visible
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
 def main(preload=False):
+
+    global TILE_ZOOM
+
     projects = load_projects(EXCEL_FILE)
+
     if preload:
-        preload_map(projects)
+
+        # Sanity check only. Loads one map at a time.
+        preload_zoom = choose_tile_zoom(projects)
+        print(f"Preloading zoom {preload_zoom}...")
+        build_texture_image(projects, preload_zoom)
+        print("Preload complete.")
         return
 
     overlaps = [
@@ -466,17 +868,34 @@ def main(preload=False):
         for overlap in project.get("overlaps", [])
         if overlap["first"] is project
     ]
+
     print(f"Loaded {len(projects)} geocoded projects.")
     print(f"Found {len(overlaps)} geographic project overlaps.")
-    print(f"Overlap checker: {len(overlaps)} relationships processed; line rendering enabled.")
-    print("Downloading OpenStreetMap floor tiles...")
+
+    # --------------------------------------------------------
+    # Initial map
+    # --------------------------------------------------------
+
     map_zoom = choose_tile_zoom(projects)
-    map_image, min_x, min_y, center_x, center_y = download_map_texture(
-        projects,
-        zoom=map_zoom,
-    )
+    TILE_ZOOM = map_zoom
+
+    print("Loading initial map floor tiles (MongoDB first, OSM fallback)...")
+
+    map_image, min_x, min_y, center_x, center_y = build_texture_image(projects, map_zoom)
+
     max_x = min_x + map_image.width // TILE_SIZE - 1
     max_y = min_y + map_image.height // TILE_SIZE - 1
+
+    # --------------------------------------------------------
+    # Cached visibility
+    # --------------------------------------------------------
+
+    visible_projects = calculate_visible_projects(projects, min_x, max_x, min_y, max_y, map_zoom)
+    visible_overlaps = calculate_visible_overlaps(overlaps, min_x, max_x, min_y, max_y, map_zoom)
+
+    # --------------------------------------------------------
+    # Pygame / OpenGL
+    # --------------------------------------------------------
 
     pygame.init()
     pygame.display.set_mode((0, 0), DOUBLEBUF | FULLSCREEN | OPENGL)
@@ -489,11 +908,22 @@ def main(preload=False):
     info_panel.set_projects(projects)
     info_panel.set_overlaps(overlaps)
 
+    # --------------------------------------------------------
+    # Async loader
+    # --------------------------------------------------------
+
+    map_loader = AsyncMapLoader(projects)
+
+    # --------------------------------------------------------
+    # Camera
+    # --------------------------------------------------------
+
     camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
-    camera_rotation_x = 90.0
+    camera_rotation_x = 52.0
     camera_rotation_y = 0.0
     camera_offset_x = 0.0
     camera_offset_z = 0.0
+    pending_focus = None
     mouse_down = False
     mouse_down_position = (0, 0)
     last_mouse_pos = (0, 0)
@@ -505,37 +935,31 @@ def main(preload=False):
     clock = pygame.time.Clock()
     running = True
 
+    def refresh_visible_cache():
+        nonlocal visible_projects, visible_overlaps
+        visible_projects = calculate_visible_projects(projects, min_x, max_x, min_y, max_y, map_zoom)
+        visible_overlaps = calculate_visible_overlaps(overlaps, min_x, max_x, min_y, max_y, map_zoom)
+
     def focus_camera_on_project(project):
-        nonlocal map_image, min_x, min_y, max_x, max_y
-        nonlocal center_x, center_y, texture_id, map_zoom
         nonlocal camera_distance, camera_rotation_x, camera_rotation_y
-        nonlocal camera_offset_x, camera_offset_z
+        nonlocal camera_offset_x, camera_offset_z, pending_focus
 
         target_zoom = min(MAX_DETAIL_ZOOM, TELEPORT_ZOOM)
-        map_zoom = target_zoom
-        glDeleteTextures([texture_id])
-        map_image, min_x, min_y, center_x, center_y = download_map_texture(
-            projects,
-            zoom=map_zoom,
-            focus=(project["lat"], project["lon"]),
-        )
-        max_x = min_x + map_image.width // TILE_SIZE - 1
-        max_y = min_y + map_image.height // TILE_SIZE - 1
-        texture_id = make_texture(map_image)
 
-        camera_offset_x, camera_offset_z = project_position(
-            project,
-            center_x,
-            center_y,
-        )
+        map_loader.request(target_zoom, focus=(project["lat"], project["lon"]))
+        pending_focus = (None, None, project["lat"], project["lon"])
+
         camera_rotation_x = 90.0
         camera_rotation_y = 0.0
         camera_distance = 110.0
 
     while running:
+
         for event in pygame.event.get():
+
             if event.type == pygame.QUIT:
                 running = False
+
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     if info_panel.search_active:
@@ -564,15 +988,20 @@ def main(preload=False):
                         focus_camera_on_project(selected_project)
                         info_panel.set_project(selected_project)
                         pygame.display.set_caption(describe_project(selected_project))
+
             elif event.type == pygame.TEXTINPUT and info_panel.search_active:
                 info_panel.append_search_text(event.text)
+
             elif event.type == pygame.MOUSEBUTTONDOWN:
+
                 if event.button == 1 and info_panel.panel_button_hit(event.pos):
                     info_panel.toggle_panel()
                     continue
+
                 if event.button == 1 and info_panel.layer_button_hit(event.pos):
                     info_panel.toggle_layer_panel()
                     continue
+
                 if event.button == 1:
                     layer = info_panel.layer_at(event.pos)
                     if layer is not None:
@@ -584,6 +1013,7 @@ def main(preload=False):
                             show_overlaps = not show_overlaps
                         info_panel.set_layers(show_desc, show_ga_its, show_overlaps)
                         continue
+
                 search_result, search_handled = info_panel.search_result_at(event.pos)
                 if search_result is not None:
                     selected_project = search_result
@@ -593,6 +1023,7 @@ def main(preload=False):
                     continue
                 if search_handled:
                     continue
+
                 if event.button == 1:
                     selected_overlap = info_panel.ranking_result_at(event.pos)
                     if selected_overlap is not None:
@@ -601,68 +1032,53 @@ def main(preload=False):
                         info_panel.set_project(selected_project)
                         pygame.display.set_caption(describe_project(selected_project))
                         continue
+
                 if event.button in (4, 5) and info_panel.ranking_active and info_panel.ranking_wheel_hit(event.pos):
                     info_panel.scroll_ranking(-1 if event.button == 4 else 1)
                     continue
+
                 if event.button == 1 and info_panel.ranking_active and info_panel.ranking_button_hit(event.pos):
                     info_panel.toggle_ranking_minimized()
                     continue
+
                 if event.button == 1:
                     mouse_down = True
                     mouse_down_position = event.pos
                     last_mouse_pos = event.pos
+
                 elif event.button == 4:
                     new_zoom = min(MAX_DETAIL_ZOOM, map_zoom + 1)
                     if new_zoom != map_zoom:
-                        mouse_focus = map_point_under_mouse(
-                            event.pos,
-                            center_x,
-                            center_y,
-                        )
+                        mouse_focus = map_point_under_mouse(event.pos, center_x, center_y, map_zoom)
                         if mouse_focus is None:
-                            mouse_focus = (0.0, 0.0, tile_y_to_lat(center_y, map_zoom), tile_x_to_lon(center_x, map_zoom))
+                            mouse_focus = (
+                                0.0, 0.0,
+                                tile_y_to_lat(center_y, map_zoom),
+                                tile_x_to_lon(center_x, map_zoom),
+                            )
                         old_map_x, old_map_z, focus_lat, focus_lon = mouse_focus
-                        map_zoom = new_zoom
-                        glDeleteTextures([texture_id])
-                        map_image, min_x, min_y, center_x, center_y = download_map_texture(
-                            projects,
-                            zoom=map_zoom,
-                            focus=(focus_lat, focus_lon),
-                        )
-                        max_x = min_x + map_image.width // TILE_SIZE - 1
-                        max_y = min_y + map_image.height // TILE_SIZE - 1
-                        texture_id = make_texture(map_image)
-                        camera_offset_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * WORLD_UNITS_PER_TILE - old_map_x
-                        camera_offset_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * WORLD_UNITS_PER_TILE - old_map_z
-                        camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
+                        pending_focus = (old_map_x, old_map_z, focus_lat, focus_lon)
+                        map_loader.request(new_zoom, focus=(focus_lat, focus_lon))
+
                 elif event.button == 5:
-                    new_zoom = max(2, map_zoom - 1)
+                    new_zoom = max(MIN_DETAIL_ZOOM, map_zoom - 1)
                     if new_zoom != map_zoom:
-                        mouse_focus = map_point_under_mouse(
-                            event.pos,
-                            center_x,
-                            center_y,
-                        )
+                        mouse_focus = map_point_under_mouse(event.pos, center_x, center_y, map_zoom)
                         if mouse_focus is None:
-                            mouse_focus = (0.0, 0.0, tile_y_to_lat(center_y, map_zoom), tile_x_to_lon(center_x, map_zoom))
+                            mouse_focus = (
+                                0.0, 0.0,
+                                tile_y_to_lat(center_y, map_zoom),
+                                tile_x_to_lon(center_x, map_zoom),
+                            )
                         old_map_x, old_map_z, focus_lat, focus_lon = mouse_focus
-                        map_zoom = new_zoom
-                        glDeleteTextures([texture_id])
-                        map_image, min_x, min_y, center_x, center_y = download_map_texture(
-                            projects,
-                            zoom=map_zoom,
-                            focus=(focus_lat, focus_lon),
-                        )
-                        max_x = min_x + map_image.width // TILE_SIZE - 1
-                        max_y = min_y + map_image.height // TILE_SIZE - 1
-                        texture_id = make_texture(map_image)
-                        camera_offset_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * WORLD_UNITS_PER_TILE - old_map_x
-                        camera_offset_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * WORLD_UNITS_PER_TILE - old_map_z
-                        camera_distance = max(95.0, max(map_image.width, map_image.height) / TILE_SIZE * 20.0)
+                        pending_focus = (old_map_x, old_map_z, focus_lat, focus_lon)
+                        map_loader.request(new_zoom, focus=(focus_lat, focus_lon))
+
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 mouse_down = False
                 if math.dist(event.pos, mouse_down_position) <= 6.0:
                     pending_click = event.pos
+
             elif event.type == pygame.MOUSEMOTION:
                 info_panel.update_pointer(event.pos)
                 if mouse_down and not info_panel.search_active:
@@ -672,10 +1088,68 @@ def main(preload=False):
                     camera_rotation_x = max(15.0, min(85.0, camera_rotation_x + delta_y * 0.5))
                     last_mouse_pos = event.pos
 
+        # ====================================================
+        # CHECK COMPLETED MAP LOAD
+        # ====================================================
+
+        loaded_map = map_loader.poll()
+
+        if loaded_map is not None:
+
+            loaded_zoom, result = loaded_map
+            new_image, new_min_x, new_min_y, new_center_x, new_center_y = result
+
+            new_texture_id = None
+            try:
+                new_texture_id = make_texture(new_image)
+            except Exception as error:
+                print(f"OpenGL texture creation failed: {error}")
+
+            if new_texture_id is not None:
+
+                old_texture = texture_id
+                texture_id = new_texture_id
+                if old_texture:
+                    glDeleteTextures([old_texture])
+
+                map_image = new_image
+                min_x = new_min_x
+                min_y = new_min_y
+                center_x = new_center_x
+                center_y = new_center_y
+                map_zoom = loaded_zoom
+                TILE_ZOOM = loaded_zoom
+
+                max_x = min_x + map_image.width // TILE_SIZE - 1
+                max_y = min_y + map_image.height // TILE_SIZE - 1
+
+                refresh_visible_cache()
+
+                if pending_focus is not None:
+
+                    old_map_x, old_map_z, focus_lat, focus_lon = pending_focus
+
+                    new_map_x = (lon_to_tile_x(focus_lon, map_zoom) - center_x) * 40.0
+                    new_map_z = (lat_to_tile_y(focus_lat, map_zoom) - center_y) * 40.0
+
+                    if old_map_x is not None:
+                        camera_offset_x += new_map_x - old_map_x
+                        camera_offset_z += new_map_z - old_map_z
+                    else:
+                        camera_offset_x = new_map_x
+                        camera_offset_z = new_map_z
+
+                    pending_focus = None
+
+        # ====================================================
+        # CAMERA MOVEMENT
+        # ====================================================
+
         frame_seconds = clock.get_time() / 1000.0
         pressed_keys = pygame.key.get_pressed()
-        movement_speed = 42.0 if pressed_keys[pygame.K_LSHIFT] or pressed_keys[pygame.K_RSHIFT] else 18.0
+        movement_speed = 42.0 if (pressed_keys[pygame.K_LSHIFT] or pressed_keys[pygame.K_RSHIFT]) else 18.0
         movement = movement_speed * frame_seconds
+
         if not info_panel.search_active and pressed_keys[pygame.K_w]:
             camera_offset_z -= movement
         if not info_panel.search_active and pressed_keys[pygame.K_s]:
@@ -685,77 +1159,75 @@ def main(preload=False):
         if not info_panel.search_active and pressed_keys[pygame.K_d]:
             camera_offset_x += movement
 
+        # ====================================================
+        # OPENGL RENDER
+        # ====================================================
+
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
         glLoadIdentity()
         glTranslatef(0.0, -4.0, -camera_distance)
         glRotatef(camera_rotation_x, 1.0, 0.0, 0.0)
         glRotatef(camera_rotation_y, 0.0, 1.0, 0.0)
         glTranslatef(-camera_offset_x, 0.0, -camera_offset_z)
+
         if pending_click is not None:
             selected_project = pick_project(
-                projects,
-                pending_click,
-                center_x,
-                center_y,
-                show_desc,
-                show_ga_its,
+                visible_projects, pending_click, center_x, center_y, map_zoom, show_desc, show_ga_its,
             )
             pending_click = None
             info_panel.set_project(selected_project)
             if selected_project is None:
-                pygame.display.set_caption(
-                    "3D Gridlock Project Map | © OpenStreetMap contributors"
-                )
+                pygame.display.set_caption("3D Gridlock Project Map | © OpenStreetMap contributors")
             else:
                 project_info = describe_project(selected_project)
                 print(f"Selected: {project_info}")
                 pygame.display.set_caption(project_info)
+
         draw_floor(texture_id, map_image, min_x, min_y, center_x, center_y)
+
         rendered_overlap_lines = (
-            draw_overlap_lines(
-                overlaps,
-                center_x,
-                center_y,
-                min_x,
-                max_x,
-                min_y,
-                max_y,
-                selected_project,
-            )
-            if show_overlaps
-            else 0
+            draw_overlap_lines(visible_overlaps, center_x, center_y, map_zoom, selected_project)
+            if show_overlaps else 0
         )
         info_panel.set_overlap_status(len(overlaps), rendered_overlap_lines)
+
         draw_axes(12.0)
-        for project in projects:
-            if not project_is_visible(project, min_x, max_x, min_y, max_y):
-                continue
+
+        for project in visible_projects:
             if project["sheet"] == "DESC Geocoded" and not show_desc:
                 continue
             if project["sheet"] == "GA ITS Geocoded" and not show_ga_its:
                 continue
-            draw_marker(
-                project,
-                center_x,
-                center_y,
-                quadric,
-                selected=project is selected_project,
-            )
+            draw_marker(project, center_x, center_y, quadric, map_zoom, selected=project is selected_project)
+
         info_panel.draw()
         pygame.display.flip()
         clock.tick(60)
 
+    # ========================================================
+    # CLEANUP
+    # ========================================================
+
+    map_loader.close()
     gluDeleteQuadric(quadric)
-    glDeleteTextures([texture_id])
+    if texture_id:
+        glDeleteTextures([texture_id])
     info_panel.close()
     pygame.quit()
 
 
+# ============================================================
+# ENTRY POINT
+# ============================================================
+
 if __name__ == "__main__":
+
     parser = argparse.ArgumentParser(description="Run the 3D project map viewer.")
     parser.add_argument(
         "--preload-map",
         action="store_true",
-        help="Download and save the map tiles used by all zoom levels, then exit.",
+        help="Fetch the initial map tiles from MongoDB (with OSM fallback), then exit.",
     )
-    main(preload=parser.parse_args().preload_map)
+
+    args = parser.parse_args()
+    main(preload=args.preload_map)

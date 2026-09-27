@@ -170,9 +170,6 @@ def load_gpc_projects(wb):
 
     for rec in _row_dicts(wb["GA ITS Geocoded"]):
 
-        if rec.get("Sponsor (GPC/GTC/MEAG/DU/SAV)") != "GPC":
-            continue
-
         lat1 = safe_float(rec.get("lat_1"))
         lon1 = safe_float(rec.get("lon_1"))
 
