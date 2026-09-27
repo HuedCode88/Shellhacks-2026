@@ -1,0 +1,5 @@
+pygame
+PyOpenGL
+openpyxl
+Pillow
+requests
