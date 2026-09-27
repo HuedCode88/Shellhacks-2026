@@ -530,3 +530,7 @@ a:focus-visible {
   padding: 0;
   margin: 0;
 }
+
+.view-toggle {
+  cursor: pointer;
+}

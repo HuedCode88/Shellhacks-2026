@@ -9,8 +9,7 @@
   <script src="/static/app.js" defer></script>
 </head>
 <body>
-  <header class="topbar">
-  </header>
+  
     
     
     <main class="workspace">
@@ -19,15 +18,14 @@
         <div class="upload-panel-header">
         <div class="panel-intro">
           <p class="eyebrow">COMPANY DATA</p>
-          <h1 id="upload-title">Project imports</h1>
-          <p class="intro-copy">Add projects from company documents to the shared map.</p>
+          <h1 id="upload-title">Import New Utility</h1>
+          <p class="intro-copy">Add projects from utility documents to the shared map.</p>
         </div>
         <button class="drawer-close" id="drawer-close" type="button" aria-label="Close project imports">✕</button>
       </div>
       
       <div class="storage-state" aria-live="polite">
-        <span class="storage-label">PROJECT DATABASE</span>
-        <span class="database-mode" id="database-mode">Local SQLite</span>
+        <span class="database-mode" id="database-mode"></span>
       </div>
       
       <form id="upload-form">
@@ -88,7 +86,7 @@
   </main>
   <div class="floating-toggle" style="position: fixed; bottom: 20px; right: 20px; left: auto;">
   <button class="view-toggle" id="second-view" type="button">
-    <span aria-hidden="true">🧊</span> 3D View
+    <span aria-hidden="true"></span> 3D View
   </button>
 </div>
 </body>

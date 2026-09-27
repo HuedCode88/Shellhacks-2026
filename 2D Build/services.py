@@ -998,12 +998,21 @@ def _build_overlap_rows_html(overlaps, project_lookup):
             if estimate:
                 shared_acres, estimated_savings = estimate
                 estimate_html = f"""
-                <div style="margin-top:6px;padding:6px 8px;background:#fff8e1;
-                            border-left:3px solid #f0ad4e;border-radius:3px;font-size:11px;color:#5c4400;">
-                    <b>\U0001f4a1 Rough estimate:</b> sharing a ~{ASSUMED_ROW_WIDTH_FT} ft right-of-way
-                    here could avoid acquiring ~{shared_acres:.1f} acres of duplicate land
-                    (~${estimated_savings:,.0f} at ~${ASSUMED_LAND_COST_PER_ACRE:,}/acre) --
-                    illustrative only, not a formal appraisal.
+                <div style="margin-top:8px;padding:9px 10px;background:#fff8e1;
+                            border:1px solid #f0c36d;border-left:4px solid #e0a11a;border-radius:5px;
+                            font-size:11px;color:#5c4400;">
+                    <div style="font-size:12px;font-weight:bold;color:#704f00;margin-bottom:6px;">
+                        \U0001f4a1 Illustrative opportunity
+                    </div>
+                    <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:5px;">
+                        <span><b>~{shared_acres:.1f} acres</b><br><span style="color:#806b38;">duplicate land avoided</span></span>
+                        <span><b>~${estimated_savings:,.0f}</b><br><span style="color:#806b38;">potential land value</span></span>
+                    </div>
+                    <div style="font-size:10px;color:#806b38;line-height:1.35;">
+                        Assumes one shared {ASSUMED_ROW_WIDTH_FT}-ft right-of-way at
+                        ~${ASSUMED_LAND_COST_PER_ACRE:,}/acre. Screening estimate only;
+                        validate with engineering, easement, and land data.
+                    </div>
                 </div>
                 """
 
@@ -1033,7 +1042,7 @@ def _build_overlap_rows_html(overlaps, project_lookup):
 def _add_legend(fmap, utility_colors, overlaps, project_lookup):
     """The single combined bottom-left control: Project Overlaps (made
     deliberately the most visually prominent section -- bold warning
-    colors, sits above everything else, open by default) followed by one
+    colors, sits above everything else, closed by default) followed by one
     row per distinct utility with a color swatch and a show/hide toggle
     right next to it. Replaces what used to be two separate widgets (a
     utility-only legend, and an entirely separate floating overlap
@@ -1072,9 +1081,9 @@ def _add_legend(fmap, utility_colors, overlaps, project_lookup):
                 background:linear-gradient(135deg,#dc3545,#b8202f);color:white;padding:10px 12px;
                 border-radius:6px;margin:-10px -14px 10px -14px;box-shadow:0 2px 8px rgba(220,53,69,0.5);">
         <span style="font-weight:bold;font-size:14px;">\u26a0 {overlap_count} Project Overlap{'s' if overlap_count != 1 else ''}</span>
-        <span id="overlap-toggle-arrow" style="font-size:12px;">\u25b2 hide</span>
+        <span id="overlap-toggle-arrow" style="font-size:12px;">\u25bc show</span>
     </div>
-    <div id="overlap-section-body" style="display:block;max-height:44vh;overflow-y:auto;margin:-4px -14px 12px -14px;
+    <div id="overlap-section-body" style="display:none;max-height:44vh;overflow-y:auto;margin:-4px -14px 12px -14px;
                 border-bottom:2px solid #eee;">
         <div style="padding:6px 12px;background:#f4f4f4;font-size:11px;color:#555;">
             Ranked by distance. Click an entry to focus the map.

@@ -84,11 +84,12 @@ async function refreshStatus() {
     const status = await requestJson("/api/status");
     const count = status.uploaded_count;
     uploadCount.textContent = `${count} ${count === 1 ? "project" : "projects"}`;
-    uploadCountBadge.textContent = String(count);
+    if (uploadCountBadge) {
+      uploadCountBadge.textContent = String(count);
+    }
     if (totalCount) {
       totalCount.textContent = `${status.total_count} mapped projects`;
     }
-    databaseMode.textContent = status.database_backend;
     clearButton.disabled = count === 0;
     uploadButton.disabled = !status.gemini_configured;
     setupWarning.hidden = status.gemini_configured;
