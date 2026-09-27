@@ -610,9 +610,18 @@ def build_map(projects):
             title_bits.append(f"[{_clean_text(p['id'], 120)}]")
         title = " ".join(title_bits)
         
-        popup_html = f"**{escape(title)}**</b><br>"
+        popup_html = f"<b>{escape(title)}</b><br>"
         popup_lines = []
         for field, value in p.get("fields", {}).items():
+            # Geocoding-pipeline internals (endpoints_tried onward:
+            # matched_endpoint_1, score_1, center_lat, confidence,
+            # match_method, etc.) come after the real project columns in
+            # the source workbook's column order -- useful while building
+            # the pipeline, not in a public popup, so stop here entirely.
+            if field.strip().lower() == "endpoints_tried":
+                break
+            if field.strip().lower() in ("geocoding method", "name"):
+                continue
             if value is None or not str(value).strip():
                 continue
             display_value = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, default=str)
