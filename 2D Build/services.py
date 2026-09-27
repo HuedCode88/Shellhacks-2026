@@ -804,13 +804,40 @@ def _add_project_search(fmap, projects):
         space is left via flexbox, not by being covered by an overlay. */
         html, body {{ height: 100%; margin: 0; padding: 0; }}
         body {{ display: flex; flex-direction: column; }}
-        #search-toolbar {{ display: flex; justify-content: flex-end; }}
+        #search-toolbar {{ 
+            width: 100%;
+            box-sizing: border-box;
+            padding: 10px 16px;
+            background: white;
+            border-bottom: 1px solid #ddd;
+            font-family: Arial, sans-serif;
+
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+
+            position: relative;
+            z-index: 1000;
+        }}
         .folium-map, div[id^="map_"] {{ flex: 1 1 auto; min-height: 0; width: 100% !important; height: auto !important; }}
 
-        #search-toolbar {{
-            width: 100%; box-sizing: border-box; padding: 10px 16px;
-            background: white; border-bottom: 1px solid #ddd; font-family: Arial, sans-serif;
-            position: relative; z-index: 1000;
+        .map-count {{
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            color: #45564e;
+            font-size: 12px;
+            font-weight: 600;
+            flex-shrink: 0;
+        }}
+
+        .count-dot {{
+            width: 8px;
+            height: 8px;
+            background: #48a379;
+            border: 2px solid #d8efe2;
+            border-radius: 50%;
+            box-sizing: content-box;
         }}
         #project-search-box {{
             display: flex; max-width: 420px; border: 1px solid #ccc; border-radius: 7px;
@@ -831,6 +858,10 @@ def _add_project_search(fmap, projects):
     </style>
 
     <div id="search-toolbar">
+        <div class="map-count" aria-live="polite">
+            <span class="count-dot" aria-hidden="true"></span>
+            <span id="total-count">Loading projects</span>
+        </div>
         <div id="project-search-box">
             <input id="project-search-input" type="text" placeholder="Search projects..." autocomplete="off">
         </div>

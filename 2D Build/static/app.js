@@ -5,7 +5,6 @@ const utilityNameInput = document.querySelector("#utility-name");
 const uploadStatus = document.querySelector("#upload-status");
 const uploadCount = document.querySelector("#upload-count");
 const uploadCountBadge = document.querySelector("#upload-count-badge");
-const totalCount = document.querySelector("#total-count");
 const databaseMode = document.querySelector("#database-mode");
 const setupWarning = document.querySelector("#setup-warning");
 const clearButton = document.querySelector("#clear-uploads");
@@ -15,6 +14,13 @@ const importsToggle = document.querySelector("#imports-toggle");
 const uploadDrawer = document.querySelector("#upload-drawer");
 const drawerBackdrop = document.querySelector("#drawer-backdrop");
 const drawerClose = document.querySelector("#drawer-close");
+
+let totalCount = null;
+
+mapFrame.addEventListener("load", () => {
+  totalCount = mapFrame.contentDocument.querySelector("#total-count");
+  refreshStatus();
+});
 
 function openDrawer() {
   uploadDrawer.classList.add("is-open");
@@ -63,7 +69,9 @@ async function refreshStatus() {
     const count = status.uploaded_count;
     uploadCount.textContent = `${count} ${count === 1 ? "project" : "projects"}`;
     uploadCountBadge.textContent = String(count);
-    totalCount.textContent = `${status.total_count} mapped projects`;
+    if (totalCount) {
+      totalCount.textContent = `${status.total_count} mapped projects`;
+    }
     databaseMode.textContent = status.database_backend;
     clearButton.disabled = count === 0;
     uploadButton.disabled = !status.gemini_configured;
