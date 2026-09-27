@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#173c32">
+  <title>Gridlock | Project Map</title>
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand" href="/" aria-label="Gridlock project map home">
+      <span class="brand-mark" aria-hidden="true">G</span>
+      <span class="brand-name">GRIDLOCK <span>PROJECT MAP</span></span>
+    </a>
+    <div class="topbar-right">
+      <div class="map-count" aria-live="polite">
+        <span class="count-dot" aria-hidden="true"></span>
+        <span id="total-count">Loading projects</span>
+      </div>
+      <button class="imports-toggle" id="imports-toggle" type="button" aria-expanded="false" aria-controls="upload-drawer">
+        <span aria-hidden="true">📁</span> <span class="imports-toggle-label">Project imports</span>
+        <span class="import-count" id="upload-count-badge">0</span>
+      </button>
+    </div>
+  </header>
+
+  <main class="workspace">
+    <div class="drawer-backdrop" id="drawer-backdrop" hidden></div>
+    <aside class="upload-panel" id="upload-drawer" aria-labelledby="upload-title">
+      <div class="upload-panel-header">
+        <div class="panel-intro">
+          <p class="eyebrow">COMPANY DATA</p>
+          <h1 id="upload-title">Project imports</h1>
+          <p class="intro-copy">Add projects from company documents to the shared map.</p>
+        </div>
+        <button class="drawer-close" id="drawer-close" type="button" aria-label="Close project imports">✕</button>
+      </div>
+
+      <div class="storage-state" aria-live="polite">
+        <span class="storage-label">PROJECT DATABASE</span>
+        <span class="database-mode" id="database-mode">Local SQLite</span>
+      </div>
+
+      <form id="upload-form">
+        <label class="field-label" for="utility-name">Utility Name</label>
+        <input
+          id="utility-name"
+          type="text"
+          required
+        >
+        <label class="field-label" for="document-file">Project document</label>
+        <input
+          id="document-file"
+          name="document"
+          type="file"
+          accept=".pdf,.docx,.xlsx,.txt,.md,.csv"
+          required
+        >
+        <p class="field-note">PDF, DOCX, XLSX, TXT, MD, or CSV. 15 MB maximum.</p>
+        <button class="primary-button" id="upload-button" type="submit">
+          Parse and add projects
+        </button>
+      </form>
+
+      <div class="data-notice">
+      </div>
+
+      <section class="imports-section" aria-labelledby="imports-title">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">LOCAL DATA</p>
+            <h2 id="imports-title">Imported projects</h2>
+          </div>
+          <span class="import-count" id="upload-count">0</span>
+        </div>
+        <button class="text-button" id="clear-uploads" type="button" disabled>
+          Remove imported projects
+        </button>
+      </section>
+
+      <p class="setup-warning" id="setup-warning" hidden>Gemini is not configured. Add <code>GEMINI_API_KEY</code> to your local <code>.env</code> file and restart the app.</p>
+      <p class="upload-status" id="upload-status" role="status" aria-live="polite"></p>
+    </aside>
+
+    <section class="map-panel" aria-label="Interactive project map">
+      <div class="map-toolbar">
+        <div>
+          <p class="eyebrow">GEOCODED PROJECTS</p>
+          <h2>Project locations</h2>
+        </div>
+        <button class="refresh-button" id="refresh-map" type="button">Refresh map</button>
+      </div>
+      <iframe id="map-frame" src="/map" title="Interactive map of gridlock projects"></iframe>
+    </section>
+  </main>
+  <div id="second-view-container">
+    <button id="second-view">3D View</button>
+  </div>
+</body>
+</html>
