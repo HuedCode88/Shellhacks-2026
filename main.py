@@ -875,7 +875,7 @@ def draw_overlap_lines(overlaps, center_x, center_y, zoom, selected_project=None
     return rendered_lines
 
 
-def draw_overlap_domes(overlaps, center_x, center_y, zoom, selected_project=None):
+def draw_overlap_domes(overlaps, center_x, center_y, zoom, selected_project=None, selected_overlap=None):
     """Render translucent coordination domes at every ranked overlap site."""
     dome_radii_km = {
         "Touching / Crossing -- must coordinate (outage timing, crossing structures)": 0.4,
@@ -883,28 +883,34 @@ def draw_overlap_domes(overlaps, center_x, center_y, zoom, selected_project=None
         "Under 8 km -- can share site logistics (laydown yards, deliveries)": 8.0,
         "Under 40 km -- can share crews & equipment": 40.0,
     }
+    dome_alpha = {
+        "Touching / Crossing -- must coordinate (outage timing, crossing structures)": 0.42,
+        "Under 1.6 km -- can share the right-of-way (access roads, permits)": 0.32,
+        "Under 8 km -- can share site logistics (laydown yards, deliveries)": 0.22,
+        "Under 40 km -- can share crews & equipment": 0.12,
+    }
     sites = {}
     for overlap in overlaps:
         radius_km = dome_radii_km.get(overlap["geographic_tier"], 0.4)
         for project in (overlap["first"], overlap["second"]):
-            key = id(project)
+            key = (id(project), overlap["geographic_tier"])
             previous = sites.get(key)
             if previous is None or radius_km > previous[1]:
-                sites[key] = (project, radius_km, overlap["color"])
+                sites[key] = (project, radius_km, overlap["color"], overlap["geographic_tier"])
 
     glPushAttrib(GL_ENABLE_BIT | GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT)
     glEnable(GL_BLEND)
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA)
     glDepthMask(GL_FALSE)
     glDisable(GL_TEXTURE_2D)
-    for project, radius_km, color in sites.values():
+    for project, radius_km, color, tier in sites.values():
         x, z = project_position(project, center_x, center_y, zoom)
         latitude_scale = math.cos(math.radians(project["lat"]))
         kilometers_per_tile = (
             156543.03392 * latitude_scale / (2 ** zoom) * TILE_SIZE / 1000.0
         )
         radius = radius_km / kilometers_per_tile * WORLD_UNITS_PER_TILE
-        glColor4f(color[0], color[1], color[2], 0.28)
+        glColor4f(1.0, 0.82, 0.05, dome_alpha.get(tier, 0.12))
         for ring in range(8):
             phi0 = (math.pi / 2.0) * ring / 8.0
             phi1 = (math.pi / 2.0) * (ring + 1) / 8.0
@@ -914,6 +920,17 @@ def draw_overlap_domes(overlaps, center_x, center_y, zoom, selected_project=None
                 glVertex3f(x + radius * math.cos(phi0) * math.cos(theta), 0.08 + radius * math.sin(phi0), z + radius * math.cos(phi0) * math.sin(theta))
                 glVertex3f(x + radius * math.cos(phi1) * math.cos(theta), 0.08 + radius * math.sin(phi1), z + radius * math.cos(phi1) * math.sin(theta))
             glEnd()
+        glColor4f(0.0, 0.0, 0.0, 0.2)
+        glLineWidth(2.0)
+        glBegin(GL_LINE_LOOP)
+        for segment in range(48):
+            theta = 2.0 * math.pi * segment / 48.0
+            glVertex3f(
+                x + radius * math.cos(theta),
+                0.1,
+                z + radius * math.sin(theta),
+            )
+        glEnd()
     glDepthMask(GL_TRUE)
     glPopAttrib()
 
@@ -1034,10 +1051,13 @@ def main(preload=False):
     mouse_down_position = (0, 0)
     last_mouse_pos = (0, 0)
     selected_project = None
+    selected_overlap = None
     pending_click = None
+    pending_right_click = None
     pending_double_click = False
     last_click_time = 0
     last_click_position = (0, 0)
+    ui_click_consumed = False
     show_desc = True
     show_ga_its = True
     show_overlaps = True
@@ -1100,6 +1120,7 @@ def main(preload=False):
                     search_result = info_panel.choose_search_result()
                     if search_result is not None:
                         selected_project = search_result
+                        selected_overlap = None
                         focus_camera_on_project(selected_project)
                         info_panel.set_project(selected_project)
                         pygame.display.set_caption(describe_project(selected_project))
@@ -1111,14 +1132,17 @@ def main(preload=False):
 
                 if event.button == 1 and info_panel.details_close_hit(event.pos):
                     info_panel.collapse_details()
+                    ui_click_consumed = True
                     continue
 
                 if event.button == 1 and info_panel.panel_button_hit(event.pos):
                     info_panel.toggle_panel()
+                    ui_click_consumed = True
                     continue
 
                 if event.button == 1 and info_panel.layer_button_hit(event.pos):
                     info_panel.toggle_layer_panel()
+                    ui_click_consumed = True
                     continue
 
                 if event.button == 1:
@@ -1134,16 +1158,20 @@ def main(preload=False):
                             else:
                                 show_domes = not show_domes
                         info_panel.set_layers(show_desc, show_ga_its, show_overlaps, show_domes)
+                        ui_click_consumed = True
                         continue
 
                 search_result, search_handled = info_panel.search_result_at(event.pos)
                 if search_result is not None:
                     selected_project = search_result
+                    selected_overlap = None
                     focus_camera_on_project(selected_project)
                     info_panel.set_project(selected_project)
                     pygame.display.set_caption(describe_project(selected_project))
+                    ui_click_consumed = True
                     continue
                 if search_handled:
+                    ui_click_consumed = True
                     continue
 
                 if event.button == 1:
@@ -1153,6 +1181,7 @@ def main(preload=False):
                         focus_camera_on_project(selected_project)
                         info_panel.set_project(selected_project)
                         pygame.display.set_caption(describe_project(selected_project))
+                        ui_click_consumed = True
                         continue
 
                 if event.button in (4, 5) and info_panel.ranking_active and info_panel.ranking_wheel_hit(event.pos):
@@ -1161,6 +1190,7 @@ def main(preload=False):
 
                 if event.button == 1 and info_panel.ranking_active and info_panel.ranking_button_hit(event.pos):
                     info_panel.toggle_ranking_minimized()
+                    ui_click_consumed = True
                     continue
 
                 if event.button == 1:
@@ -1198,7 +1228,7 @@ def main(preload=False):
 
             elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
                 mouse_down = False
-                if math.dist(event.pos, mouse_down_position) <= 6.0:
+                if not ui_click_consumed and math.dist(event.pos, mouse_down_position) <= 6.0:
                     current_time = pygame.time.get_ticks()
                     pending_double_click = (
                         current_time - last_click_time <= 450
@@ -1207,6 +1237,10 @@ def main(preload=False):
                     last_click_time = current_time
                     last_click_position = event.pos
                     pending_click = event.pos
+                ui_click_consumed = False
+
+            elif event.type == pygame.MOUSEBUTTONUP and event.button == 3:
+                pending_right_click = event.pos
 
             elif event.type == pygame.MOUSEMOTION:
                 info_panel.update_pointer(event.pos)
@@ -1305,6 +1339,7 @@ def main(preload=False):
                 visible_projects, pending_click, center_x, center_y, map_zoom, show_desc, show_ga_its,
             )
             pending_click = None
+            selected_overlap = None
             was_double_click = pending_double_click and selected_project is previously_selected_project
             pending_double_click = False
             info_panel.set_project(selected_project)
@@ -1317,10 +1352,35 @@ def main(preload=False):
                 print(f"Selected: {project_info}")
                 pygame.display.set_caption(project_info)
 
+        if pending_right_click is not None:
+            right_clicked_project = pick_project(
+                visible_projects,
+                pending_right_click,
+                center_x,
+                center_y,
+                map_zoom,
+                show_desc,
+                show_ga_its,
+            )
+            pending_right_click = None
+            if right_clicked_project is not None:
+                selected_project = right_clicked_project
+                selected_overlap = None
+                focus_camera_on_project(selected_project)
+                info_panel.set_project(selected_project)
+                pygame.display.set_caption(describe_project(selected_project))
+
         draw_floor(texture_id, map_image, min_x, min_y, center_x, center_y)
 
         if show_domes:
-            draw_overlap_domes(visible_overlaps, center_x, center_y, map_zoom, selected_project)
+            draw_overlap_domes(
+                visible_overlaps,
+                center_x,
+                center_y,
+                map_zoom,
+                selected_project,
+                selected_overlap,
+            )
 
         rendered_overlap_lines = (
             draw_overlap_lines(visible_overlaps, center_x, center_y, map_zoom, selected_project)
