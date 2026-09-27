@@ -4,12 +4,42 @@ const fileInput = document.querySelector("#document-file");
 const utilityNameInput = document.querySelector("#utility-name");
 const uploadStatus = document.querySelector("#upload-status");
 const uploadCount = document.querySelector("#upload-count");
+const uploadCountBadge = document.querySelector("#upload-count-badge");
 const totalCount = document.querySelector("#total-count");
 const databaseMode = document.querySelector("#database-mode");
 const setupWarning = document.querySelector("#setup-warning");
 const clearButton = document.querySelector("#clear-uploads");
 const refreshButton = document.querySelector("#refresh-map");
 const mapFrame = document.querySelector("#map-frame");
+const importsToggle = document.querySelector("#imports-toggle");
+const uploadDrawer = document.querySelector("#upload-drawer");
+const drawerBackdrop = document.querySelector("#drawer-backdrop");
+const drawerClose = document.querySelector("#drawer-close");
+
+function openDrawer() {
+  uploadDrawer.classList.add("is-open");
+  drawerBackdrop.hidden = false;
+  importsToggle.setAttribute("aria-expanded", "true");
+}
+
+function closeDrawer() {
+  uploadDrawer.classList.remove("is-open");
+  drawerBackdrop.hidden = true;
+  importsToggle.setAttribute("aria-expanded", "false");
+}
+
+importsToggle.addEventListener("click", () => {
+  if (uploadDrawer.classList.contains("is-open")) {
+    closeDrawer();
+  } else {
+    openDrawer();
+  }
+});
+drawerClose.addEventListener("click", closeDrawer);
+drawerBackdrop.addEventListener("click", closeDrawer);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") { closeDrawer(); }
+});
 
 async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
@@ -32,6 +62,7 @@ async function refreshStatus() {
     const status = await requestJson("/api/status");
     const count = status.uploaded_count;
     uploadCount.textContent = `${count} ${count === 1 ? "project" : "projects"}`;
+    uploadCountBadge.textContent = String(count);
     totalCount.textContent = `${status.total_count} mapped projects`;
     databaseMode.textContent = status.database_backend;
     clearButton.disabled = count === 0;
@@ -87,6 +118,7 @@ uploadForm.addEventListener("submit", async (event) => {
     setUploadStatus(summary.join(" "));
     uploadForm.reset();
     refreshMap();
+    closeDrawer();
     await refreshStatus();
   } catch (error) {
     setUploadStatus(error.message, true);

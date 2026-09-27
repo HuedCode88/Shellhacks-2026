@@ -4,7 +4,6 @@ import json
 import os
 import time
 import zipfile
-from datetime import datetime
 from html import escape
 from threading import Lock
 from urllib.error import URLError
@@ -21,38 +20,116 @@ from config import (
     ICON_COLOR_HEX, MAX_ARCHIVE_UNCOMPRESSED_BYTES, MAX_CHUNKS_PER_UPLOAD,
     MAX_DOCUMENT_CHARS, MAX_GEOCODES_HARD_CAP, MAX_PROJECTS_PER_UPLOAD,
     OVERPASS_BBOXES, PDF_PAGES_PER_REQUEST, PDF_PAGE_OVERLAP,
-    PROJECT_RESPONSE_SCHEMA, EXCEL_FILE
+    PROJECT_RESPONSE_SCHEMA
 )
 from geocoding.geocode_match import extract_endpoints
 from geocoding.live_lookup import geocode_by_name
 from utils import safe_float, _clean_text, _normalise_field_name
 from database import get_source_color
-from build_overlap_table import (
-    load_desc_projects,
-    load_gpc_projects,
-    build_overlap_table as compute_overlap_table,
-)
+from build_overlap_table import build_overlap_table as compute_overlap_table
 
 OVERLAP_LINE_COLOR = "#00FFFF"  # every tier used this same color in the original script
 
 
-def _load_workbook_overlaps():
-    """Reads DESC/GPC projects straight from the workbook and computes overlaps."""
-    wb = openpyxl.load_workbook(EXCEL_FILE, data_only=True)
-    try:
-        desc_projects = load_desc_projects(wb)
-        gpc_projects = load_gpc_projects(wb)
-    finally:
-        wb.close()
-    return compute_overlap_table(desc_projects, gpc_projects)
+def _project_dicts_for_overlap(projects):
+    """Converts our already-loaded project dicts (workbook rows AND
+    uploads alike) into the shape build_overlap_table's geometry
+    functions expect, grouped by utility/layer name. Generalizes the
+    original DESC/GPC-only workbook loaders (load_desc_projects /
+    load_gpc_projects) to work for any number of utilities, so a newly
+    uploaded one gets checked against the others too -- not just the two
+    sheets baked into the original static Excel file.
+
+    An in-service/completion date is found the same way _status_key()
+    finds one: scan the project's fields for anything with "date" in its
+    column name and try to parse it. Not every source has one; a project
+    with no parseable date just gets in_service_date=None, which
+    build_overlap_table already handles (timeline_overlap comes back
+    unknown rather than the pair being dropped)."""
+    from dateutil import parser as dateparser
+
+    groups = {}
+    for p in projects:
+        lat, lon = p.get("lat"), p.get("lon")
+        if lat is None or lon is None:
+            continue
+        layer_name = p.get("sheet") or p.get("source_name") or "Projects"
+
+        in_service_date = None
+        for field_name, value in (p.get("fields") or {}).items():
+            if "date" not in field_name.lower():
+                continue
+            try:
+                in_service_date = dateparser.parse(str(value)).date()
+                break
+            except (ValueError, OverflowError, TypeError):
+                continue
+
+        groups.setdefault(layer_name, []).append({
+            "utility": layer_name,
+            "id": p.get("id") if p.get("id") is not None else p.get("name"),
+            "name": p.get("name"),
+            "p1": (lat, lon),
+            "p2": (lat, lon),
+            "has_endpoint_2": False,
+            "in_service_date": in_service_date,
+        })
+    return groups
+
+
+def _load_live_overlaps(projects):
+    """Computes overlaps between every pair of distinct utility groups
+    present in `projects` right now. Unlike the original
+    _load_workbook_overlaps() (which only ever checked the two sheets
+    baked into the static Excel file), this reads whatever utilities are
+    currently in the database -- so uploading a new one gets it checked
+    against every existing utility on the very next map refresh, with no
+    extra step. Each overlap dict is tagged with which two utility/layer
+    names it came from (desc_utility / gpc_utility) so the map-drawing
+    functions below can look the right projects up regardless of which
+    two utilities are actually involved."""
+    groups = _project_dicts_for_overlap(projects)
+    layer_names = list(groups.keys())
+    print(f"[overlaps] utility groups this refresh: "
+          f"{', '.join(f'{name} ({len(groups[name])})' for name in layer_names)}")
+
+    all_overlaps = []
+    for i in range(len(layer_names)):
+        for j in range(i + 1, len(layer_names)):
+            pair_overlaps = compute_overlap_table(groups[layer_names[i]], groups[layer_names[j]])
+            print(f"[overlaps]   {layer_names[i]} <-> {layer_names[j]}: {len(pair_overlaps)} found")
+            for overlap in pair_overlaps:
+                overlap["desc_utility"] = layer_names[i]
+                overlap["gpc_utility"] = layer_names[j]
+            all_overlaps.extend(pair_overlaps)
+
+    all_overlaps.sort(
+        key=lambda r: (
+            r["distance_km"],
+            r["day_gap"] if r["day_gap"] is not None else float("inf"),
+        )
+    )
+    print(f"[overlaps] total: {len(all_overlaps)}")
+    return all_overlaps
 
 
 def _build_project_lookup(projects):
+    """Keyed the exact same way _project_dicts_for_overlap() builds the
+    "id" fed into overlap computation: fall back to the project's name
+    when it has no explicit id, rather than skipping it. Without this
+    fallback matching, an uploaded project with no project_id (Gemini
+    couldn't find one in the document -- common) would still get a real
+    geographic overlap computed against it, but the lookup here would
+    never contain an entry for it, so _add_overlap_lines/
+    _add_overlap_ranking_panel would silently drop that overlap when
+    trying to look up its projects and find nothing."""
     lookup = {}
     for project in projects:
         sheet = project.get("sheet")
-        project_id = project.get("id")
-        if sheet is None or project_id is None:
+        if sheet is None:
+            continue
+        project_id = project.get("id") if project.get("id") is not None else project.get("name")
+        if project_id is None:
             continue
         lookup[(sheet, str(project_id).strip())] = project
     return lookup
@@ -66,8 +143,8 @@ def _add_overlap_lines(fmap, overlaps, project_lookup):
     highlight_snippets = []
 
     for overlap in overlaps:
-        desc_project = project_lookup.get(("DESC Geocoded", str(overlap["desc_id"]).strip()))
-        gpc_project = project_lookup.get(("GA ITS Geocoded", str(overlap["gpc_id"]).strip()))
+        desc_project = project_lookup.get((overlap.get("desc_utility", "DESC Geocoded"), str(overlap["desc_id"]).strip()))
+        gpc_project = project_lookup.get((overlap.get("gpc_utility", "GA ITS Geocoded"), str(overlap["gpc_id"]).strip()))
         if desc_project is None or gpc_project is None:
             continue
 
@@ -131,109 +208,6 @@ def _add_overlap_lines(fmap, overlaps, project_lookup):
     print(f"Added {drawn} overlap lines to map.")
 
 
-def _add_overlap_ranking_panel(fmap, overlaps, project_lookup):
-    if not overlaps:
-        return
-
-    from branca.element import Element
-
-    rows_html = ""
-    for rank, overlap in enumerate(overlaps, start=1):
-        desc_project = project_lookup.get(("DESC Geocoded", str(overlap["desc_id"]).strip()))
-        gpc_project = project_lookup.get(("GA ITS Geocoded", str(overlap["gpc_id"]).strip()))
-        if desc_project is None or gpc_project is None:
-            continue
-
-        desc_name = escape(str(overlap["desc_name"] or "Unknown DESC Project"))
-        gpc_name = escape(str(overlap["gpc_name"] or "Unknown GPC Project"))
-        tier = overlap["geographic_tier"]
-        time_text = "Unknown" if overlap["day_gap"] is None else f"{overlap['day_gap']} days"
-
-        if tier.startswith("Touching"):
-            color = "#dc3545"
-        elif tier.startswith("Under 1.6"):
-            color = "#fd7e14"
-        elif tier.startswith("Under 8"):
-            color = "#6f42c1"
-        else:
-            color = "#0d6efd"
-
-        rows_html += f"""
-        <div class="overlap-row" onclick="focusOverlap({desc_project['lat']}, {desc_project['lon']}, {gpc_project['lat']}, {gpc_project['lon']}, {rank});"
-             style="border-bottom:1px solid #ddd;padding:10px 8px;cursor:pointer;"
-             onmouseover="this.style.background='#f0f0f0';" onmouseout="this.style.background='white';">
-            <div style="display:flex;align-items:center;margin-bottom:5px;">
-                <span style="background:{color};color:white;border-radius:50%;width:25px;height:25px;
-                    display:inline-flex;align-items:center;justify-content:center;font-weight:bold;margin-right:8px;">{rank}</span>
-                <strong>{escape(str(overlap['desc_id']))} \u2194 {escape(str(overlap['gpc_id']))}</strong>
-            </div>
-            <div style="font-size:12px;color:#444;margin-left:33px;">
-                <div><b>DESC:</b> {desc_name}</div>
-                <div><b>GPC:</b> {gpc_name}</div>
-                <div style="margin-top:5px;color:#222;">
-                    <b>Distance:</b> {overlap['distance_km']:.2f} km ({overlap['distance_mi']:.2f} mi)
-                    &nbsp;|&nbsp; <b>Time:</b> {time_text}
-                </div>
-                <div style="margin-top:3px;color:{color};font-weight:bold;">{escape(tier)}</div>
-            </div>
-        </div>
-        """
-
-    panel_html = f"""
-    <div id="overlap-container" style="position:fixed;bottom:20px;right:20px;z-index:9999;font-family:Arial,sans-serif;">
-        <button id="overlap-toggle" onclick="toggleOverlapPanel()"
-            style="background:#222;color:white;border:none;border-radius:6px;padding:11px 16px;
-                   font-size:14px;font-weight:bold;cursor:pointer;box-shadow:0 3px 10px rgba(0,0,0,0.35);">
-            \u26a0 Project Overlaps ({len(overlaps)})
-        </button>
-        <div id="overlap-panel" style="display:none;width:400px;max-height:80vh;margin-top:8px;background:white;
-                border:2px solid #333;border-radius:8px;box-shadow:0 3px 15px rgba(0,0,0,0.35);overflow:hidden;">
-            <div style="background:#222;color:white;padding:12px;font-size:16px;font-weight:bold;">
-                Project Overlap Ranking
-                <span style="float:right;font-size:12px;font-weight:normal;opacity:0.8;">{len(overlaps)} overlaps</span>
-            </div>
-            <div style="padding:8px 12px;background:#f4f4f4;border-bottom:1px solid #ccc;font-size:12px;color:#555;">
-                Ranked by geographic distance. Click an entry to focus the map.
-            </div>
-            <div style="max-height:calc(80vh - 110px);overflow-y:auto;">{rows_html}</div>
-        </div>
-    </div>
-    <script>
-        function toggleOverlapPanel() {{
-            var panel = document.getElementById("overlap-panel");
-            var button = document.getElementById("overlap-toggle");
-            if (panel.style.display === "none" || panel.style.display === "") {{
-                panel.style.display = "block";
-                button.innerHTML = "\u2715 Close Overlaps";
-            }} else {{
-                panel.style.display = "none";
-                button.innerHTML = "\u26a0 Project Overlaps ({len(overlaps)})";
-            }}
-        }}
-        function focusOverlap(lat1, lon1, lat2, lon2, rank) {{
-            var mapObject = null;
-            for (var key in window) {{
-                if (key.startsWith("map_") && window[key] && typeof window[key].fitBounds === "function") {{
-                    mapObject = window[key];
-                    break;
-                }}
-            }}
-            if (!mapObject) {{ console.error("Could not find Leaflet map."); return; }}
-            var bounds = [[lat1, lon1], [lat2, lon2]];
-            mapObject.fitBounds(bounds, {{ padding: [100, 100], maxZoom: 12 }});
-            if (window.activeOverlapLine) {{ mapObject.removeLayer(window.activeOverlapLine); }}
-            window.activeOverlapLine = L.polyline(bounds, {{ color: "#ff0000", weight: 8, opacity: 0.9, dashArray: "10, 8" }}).addTo(mapObject);
-            setTimeout(function() {{
-                if (window.activeOverlapLine) {{
-                    mapObject.removeLayer(window.activeOverlapLine);
-                    window.activeOverlapLine = null;
-                }}
-            }}, 5000);
-        }}
-    </script>
-    """
-
-    fmap.get_root().html.add_child(Element(panel_html))
 GEOCODING_LOCK = Lock()
 LAST_GEOCODE_AT = 0.0
 
@@ -825,17 +799,27 @@ def _add_project_search(fmap, projects):
 
     search_html = f"""
     <style>
-        #project-search-container {{
-            position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
-            z-index: 9999; font-family: Arial, sans-serif; width: 330px;
+        /* Reserves a real toolbar strip above the map instead of floating
+        the search box on top of it -- the map fills whatever vertical
+        space is left via flexbox, not by being covered by an overlay. */
+        html, body {{ height: 100%; margin: 0; padding: 0; }}
+        body {{ display: flex; flex-direction: column; }}
+        #search-toolbar {{ display: flex; justify-content: flex-end; }}
+        .folium-map, div[id^="map_"] {{ flex: 1 1 auto; min-height: 0; width: 100% !important; height: auto !important; }}
+
+        #search-toolbar {{
+            width: 100%; box-sizing: border-box; padding: 10px 16px;
+            background: white; border-bottom: 1px solid #ddd; font-family: Arial, sans-serif;
+            position: relative; z-index: 1000;
         }}
         #project-search-box {{
-            background: white; border-radius: 7px;
-            box-shadow: 0 3px 12px rgba(0,0,0,0.3); overflow: hidden;
+            display: flex; max-width: 420px; border: 1px solid #ccc; border-radius: 7px;
+            overflow: hidden;
         }}
-        #project-search-input {{ flex: 1; border: none; padding: 11px 12px; font-size: 14px; outline: none; min-width: 0; }}
+        #project-search-input {{ flex: 1; border: none; padding: 9px 12px; font-size: 14px; outline: none; min-width: 0; }}
         #project-search-results {{
-            display: none; margin-top: 6px; background: white; border-radius: 7px;
+            display: none; position: absolute; top: 100%; right: 16px; left: auto; width: 400px;
+            margin-top: 4px; background: white; border-radius: 7px;
             box-shadow: 0 3px 12px rgba(0,0,0,0.3); max-height: 400px; overflow-y: auto;
         }}
         .project-search-result {{ padding: 10px 12px; border-bottom: 1px solid #ddd; cursor: pointer; font-size: 13px; }}
@@ -846,7 +830,7 @@ def _add_project_search(fmap, projects):
         .project-search-no-results {{ padding: 12px; color: #666; font-size: 13px; }}
     </style>
 
-    <div id="project-search-container">
+    <div id="search-toolbar">
         <div id="project-search-box">
             <input id="project-search-input" type="text" placeholder="Search projects..." autocomplete="off">
         </div>
@@ -933,118 +917,267 @@ def _add_project_search(fmap, projects):
 
     fmap.get_root().html.add_child(Element(search_html))
 
-_PLANNED_KEYWORDS = ("plan", "propos", "future")
-_DATE_FORMATS = ("%m/%d/%Y", "%m/%d/%y", "%Y-%m-%d")
+def _build_overlap_rows_html(overlaps, project_lookup):
+    """Builds the ranked-list HTML for every overlap, including the bonus
+    rough cost/impact estimate. Split out from the legend builder below
+    just to keep that function from being unreadably huge."""
+    # Bonus feature: a rough, clearly-labeled illustrative estimate of
+    # land/cost savings if two nearby projects shared a single
+    # right-of-way corridor instead of two separate ones. NOT a real
+    # engineering or financial estimate -- generic industry-ballpark
+    # assumptions, stated alongside the number so that's obvious. Always
+    # shown for at least the #1-ranked (closest) overlap; shown for
+    # others too when they're close enough that sharing a corridor is
+    # actually plausible.
+    ASSUMED_ROW_WIDTH_FT = 100
+    ASSUMED_LAND_COST_PER_ACRE = 12000
 
-def _parse_loose_date(text):
-    text = (text or "").strip()
-    if not text:
-        return None
-    for date_format in _DATE_FORMATS:
-        try:
-            return datetime.strptime(text, date_format)
-        except ValueError:
+    def estimate_shared_row_savings(distance_mi):
+        if distance_mi is None:
+            return None
+        corridor_length_ft = distance_mi * 5280
+        shared_acres = (corridor_length_ft * ASSUMED_ROW_WIDTH_FT) / 43560
+        estimated_savings = shared_acres * ASSUMED_LAND_COST_PER_ACRE
+        return shared_acres, estimated_savings
+
+    rows_html = ""
+    for rank, overlap in enumerate(overlaps, start=1):
+        desc_project = project_lookup.get((overlap.get("desc_utility", "DESC Geocoded"), str(overlap["desc_id"]).strip()))
+        gpc_project = project_lookup.get((overlap.get("gpc_utility", "GA ITS Geocoded"), str(overlap["gpc_id"]).strip()))
+        if desc_project is None or gpc_project is None:
             continue
-    return None
 
-def _status_color_hex(category, fields):
-    """Buckets a project into exactly two colors -- "planned" (blue) or
-    "current" (orange) -- so status reads consistently across every
-    utility/layer, instead of the previous per-utility coloring.
+        desc_name = escape(str(overlap["desc_name"] or "Unknown project"))
+        gpc_name = escape(str(overlap["gpc_name"] or "Unknown project"))
+        tier = overlap["geographic_tier"]
+        time_text = "Unknown" if overlap["day_gap"] is None else f"{overlap['day_gap']} days"
 
-    Not every data source has an explicit status: DESC's "Status" column
-    (via `category`) says "Planned" or "In Progress" directly, but GA
-    ITS only has "Sponsor" in that slot, and an uploaded document might
-    not include a status field Gemini could extract at all. For anything
-    without recognizable status wording, this falls back to comparing an
-    in-service/completion date (whichever date-like field is present)
-    against today -- a date still in the future reads as "planned",
-    anything at or before today reads as "current"."""
-    text = (category or "").strip().lower()
-    if any(keyword in text for keyword in _PLANNED_KEYWORDS):
-        return ICON_COLOR_HEX["blue"]
+        if tier.startswith("Touching"):
+            color = "#dc3545"
+        elif tier.startswith("Under 1.6"):
+            color = "#fd7e14"
+        elif tier.startswith("Under 8"):
+            color = "#6f42c1"
+        else:
+            color = "#0d6efd"
 
-    for field_name, value in (fields or {}).items():
-        if "date" not in field_name.lower():
-            continue
-        parsed = _parse_loose_date(str(value))
-        if parsed and parsed > datetime.now():
-            return ICON_COLOR_HEX["blue"]
+        estimate_html = ""
+        if rank == 1 or tier.startswith("Touching") or tier.startswith("Under 1.6"):
+            estimate = estimate_shared_row_savings(overlap.get("distance_mi"))
+            if estimate:
+                shared_acres, estimated_savings = estimate
+                estimate_html = f"""
+                <div style="margin-top:6px;padding:6px 8px;background:#fff8e1;
+                            border-left:3px solid #f0ad4e;border-radius:3px;font-size:11px;color:#5c4400;">
+                    <b>\U0001f4a1 Rough estimate:</b> sharing a ~{ASSUMED_ROW_WIDTH_FT} ft right-of-way
+                    here could avoid acquiring ~{shared_acres:.1f} acres of duplicate land
+                    (~${estimated_savings:,.0f} at ~${ASSUMED_LAND_COST_PER_ACRE:,}/acre) --
+                    illustrative only, not a formal appraisal.
+                </div>
+                """
 
-    return ICON_COLOR_HEX["orange"]
-
-def _add_color_mode_control(fmap, marker_records):
-    from branca.element import Element
-
-    marker_data_js = ",\n".join(
-        f"""
-        {{
-            marker: {marker_var},
-            utility: "{utility_color}"
-        }}
-        """
-        for marker_var, utility_color in marker_records
-    )
-
-    control_html = f"""
-    <div id="color-mode-container"
-         style="position:fixed;bottom:20px;left:20px;z-index:9999;
-                font-family:Arial,sans-serif;background:white;
-                border:1px solid #ccc;border-radius:6px;
-                padding:10px 14px;box-shadow:0 3px 10px rgba(0,0,0,0.25);
-                font-size:13px;">
-
-        <div>
-            <div>
-                <span style="display:inline-block;width:12px;height:12px;
-                    border-radius:50%;background:#007bff;margin-right:8px;">
-                </span>
-                DESC
+        rows_html += f"""
+        <div class="overlap-row" onclick="focusOverlap({desc_project['lat']}, {desc_project['lon']}, {gpc_project['lat']}, {gpc_project['lon']}, {rank});"
+             style="border-bottom:1px solid #ddd;padding:10px 8px;cursor:pointer;"
+             onmouseover="this.style.background='#f8f0e0';" onmouseout="this.style.background='white';">
+            <div style="display:flex;align-items:center;margin-bottom:5px;">
+                <span style="background:{color};color:white;border-radius:50%;width:22px;height:22px;
+                    display:inline-flex;align-items:center;justify-content:center;font-weight:bold;margin-right:8px;font-size:11px;">{rank}</span>
+                <strong style="font-size:12px;">{escape(str(overlap['desc_id']))} \u2194 {escape(str(overlap['gpc_id']))}</strong>
             </div>
-
-            <div>
-                <span style="display:inline-block;width:12px;height:12px;
-                    border-radius:50%;background:#fd7e14;margin-right:8px;">
-                </span>
-                GA ITS
+            <div style="font-size:11px;color:#444;margin-left:30px;">
+                <div>{desc_name}</div>
+                <div>{gpc_name}</div>
+                <div style="margin-top:4px;color:#222;">
+                    <b>{overlap['distance_mi']:.2f} mi</b> &nbsp;|&nbsp; {time_text}
+                </div>
+                <div style="margin-top:2px;color:{color};font-weight:bold;">{escape(tier)}</div>
+                {estimate_html}
             </div>
         </div>
+        """
+    return rows_html
+
+
+def _add_legend(fmap, utility_colors, overlaps, project_lookup):
+    """The single combined bottom-left control: Project Overlaps (made
+    deliberately the most visually prominent section -- bold warning
+    colors, sits above everything else, open by default) followed by one
+    row per distinct utility with a color swatch and a show/hide toggle
+    right next to it. Replaces what used to be two separate widgets (a
+    utility-only legend, and an entirely separate floating overlap
+    button+panel at the opposite corner of the screen).
+
+    utility_colors: list of (utility_name, hex_color, feature_group_js_var).
+    overlaps / project_lookup: as computed by _load_live_overlaps() and
+    _build_project_lookup(); pass overlaps=[] to render just the utility
+    section (e.g. if overlap computation failed for this refresh).
+    """
+    from branca.element import Element
+
+    utility_rows_html = "".join(
+        f'''
+        <div class="utility-legend-row" data-utility-index="{index}"
+             style="display:flex;align-items:center;justify-content:space-between;gap:10px;
+                    margin-bottom:4px;cursor:pointer;user-select:none;">
+            <div style="display:flex;align-items:center;min-width:0;">
+                <span class="utility-legend-dot" style="display:inline-block;width:12px;height:12px;
+                    border-radius:50%;background:{hex_color};margin-right:8px;flex:0 0 auto;"></span>
+                <span class="utility-legend-label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">{escape(str(name))}</span>
+            </div>
+            <input type="checkbox" class="utility-legend-toggle" data-utility-index="{index}" checked
+                   style="flex:0 0 auto;cursor:pointer;">
+        </div>
+        '''
+        for index, (name, hex_color, _group_var) in enumerate(utility_colors)
+    )
+    group_vars_js = ",\n            ".join(group_var for _name, _hex_color, group_var in utility_colors)
+
+    overlap_count = len(overlaps)
+    overlap_rows_html = _build_overlap_rows_html(overlaps, project_lookup) if overlaps else ""
+    overlap_section_html = "" if not overlaps else f'''
+    <div id="overlap-toggle-row" onclick="toggleOverlapSection()"
+         style="display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none;
+                background:linear-gradient(135deg,#dc3545,#b8202f);color:white;padding:10px 12px;
+                border-radius:6px;margin:-10px -14px 10px -14px;box-shadow:0 2px 8px rgba(220,53,69,0.5);">
+        <span style="font-weight:bold;font-size:14px;">\u26a0 {overlap_count} Project Overlap{'s' if overlap_count != 1 else ''}</span>
+        <span id="overlap-toggle-arrow" style="font-size:12px;">\u25b2 hide</span>
     </div>
+    <div id="overlap-section-body" style="display:block;max-height:44vh;overflow-y:auto;margin:-4px -14px 12px -14px;
+                border-bottom:2px solid #eee;">
+        <div style="padding:6px 12px;background:#f4f4f4;font-size:11px;color:#555;">
+            Ranked by distance. Click an entry to focus the map.
+        </div>
+        {overlap_rows_html}
+    </div>
+    '''
 
+    legend_html = f"""
+    <div id="legend-container" style="position:fixed;bottom:20px;left:20px;z-index:9999;
+                font-family:Arial,sans-serif;background:white;border:1px solid #ccc;border-radius:6px;
+                padding:10px 14px;box-shadow:0 3px 14px rgba(0,0,0,0.3);font-size:13px;max-width:300px;">
+        {overlap_section_html}
+        <div style="font-weight:bold;margin-bottom:6px;">Utilities <span style="font-weight:normal;color:#888;font-size:11px;">(toggle to show/hide)</span></div>
+        {utility_rows_html}
+    </div>
     <script>
-        var utilityMarkers = [
-            {marker_data_js}
-        ];
+        function toggleOverlapSection() {{
+            var body = document.getElementById("overlap-section-body");
+            var arrow = document.getElementById("overlap-toggle-arrow");
+            if (body.style.display === "none") {{
+                body.style.display = "block";
+                arrow.innerHTML = "\u25b2 hide";
+            }} else {{
+                body.style.display = "none";
+                arrow.innerHTML = "\u25bc show";
+            }}
+        }}
 
-        utilityMarkers.forEach(function(entry) {{
-            entry.marker.setStyle({{
-                color: entry.utility,
-                fillColor: entry.utility
+        function focusOverlap(lat1, lon1, lat2, lon2, rank) {{
+            var mapObject = null;
+            for (var key in window) {{
+                if (key.startsWith("map_") && window[key] && typeof window[key].fitBounds === "function") {{
+                    mapObject = window[key];
+                    break;
+                }}
+            }}
+            if (!mapObject) {{ console.error("Could not find Leaflet map."); return; }}
+            var bounds = [[lat1, lon1], [lat2, lon2]];
+            mapObject.fitBounds(bounds, {{ padding: [100, 100], maxZoom: 12 }});
+            if (window.activeOverlapLine) {{ mapObject.removeLayer(window.activeOverlapLine); }}
+            window.activeOverlapLine = L.polyline(bounds, {{ color: "#ff0000", weight: 8, opacity: 0.9, dashArray: "10, 8" }}).addTo(mapObject);
+            setTimeout(function() {{
+                if (window.activeOverlapLine) {{
+                    mapObject.removeLayer(window.activeOverlapLine);
+                    window.activeOverlapLine = null;
+                }}
+            }}, 5000);
+        }}
+
+        // Deferred into a function rather than a plain array built here --
+        // Folium's own script (which actually creates these FeatureGroup
+        // variables) may not have run yet when THIS script parses, so
+        // referencing them eagerly would capture "undefined" forever. A
+        // function only dereferences the bare identifiers when actually
+        // called, by which point the whole page (and Folium's script)
+        // has finished loading.
+        function getUtilityGroups() {{
+            return [
+                {group_vars_js}
+            ];
+        }}
+
+        var utilityMapObject = null;
+        function findLeafletMap() {{
+            for (var key in window) {{
+                if (key.startsWith("map_") && window[key] && typeof window[key].hasLayer === "function") {{
+                    return window[key];
+                }}
+            }}
+            return null;
+        }}
+
+        function setUtilityVisibility(index, visible) {{
+            if (!utilityMapObject) {{ utilityMapObject = findLeafletMap(); }}
+            if (!utilityMapObject) {{ return; }}
+            var group = getUtilityGroups()[index];
+            if (visible) {{
+                if (!utilityMapObject.hasLayer(group)) {{ utilityMapObject.addLayer(group); }}
+            }} else {{
+                if (utilityMapObject.hasLayer(group)) {{ utilityMapObject.removeLayer(group); }}
+            }}
+        }}
+
+        document.querySelectorAll(".utility-legend-toggle").forEach(function(checkbox) {{
+            var index = parseInt(checkbox.getAttribute("data-utility-index"), 10);
+            checkbox.addEventListener("click", function(event) {{
+                event.stopPropagation();
+                setUtilityVisibility(index, checkbox.checked);
+            }});
+        }});
+
+        document.querySelectorAll(".utility-legend-row").forEach(function(row) {{
+            row.addEventListener("click", function(event) {{
+                if (event.target.classList.contains("utility-legend-toggle")) {{ return; }}
+                var index = parseInt(row.getAttribute("data-utility-index"), 10);
+                var checkbox = row.querySelector(".utility-legend-toggle");
+                checkbox.checked = !checkbox.checked;
+                setUtilityVisibility(index, checkbox.checked);
             }});
         }});
     </script>
     """
-
-    fmap.get_root().html.add_child(Element(control_html))
+    fmap.get_root().html.add_child(Element(legend_html))
 
 
 def build_map(projects):
     if not projects:
         raise ValueError("No geocoded projects found -- nothing to map.")
 
-    center_lat = sum(p["lat"] for p in projects) / len(projects)
-    center_lon = sum(p["lon"] for p in projects) / len(projects)
+    lats = [p["lat"] for p in projects]
+    lons = [p["lon"] for p in projects]
+    center_lat = sum(lats) / len(lats)
+    center_lon = sum(lons) / len(lons)
     fmap = folium.Map(
         location=[center_lat, center_lon],
         zoom_start=7,
         tiles="OpenStreetMap",
     )
+    # fit_bounds (rather than a fixed zoom_start anchored on a naive
+    # average) is what actually keeps the initial view "centered" as more
+    # utilities get added -- a plain average of every point's lat/lon
+    # drifts toward whatever's geographically in between two spread-out
+    # clusters (which can be nowhere near either one) once a new, distant
+    # utility gets uploaded. A single project still gets a sane default
+    # zoom rather than fit_bounds' would-be zoom-to-a-point behavior.
+    if len(projects) > 1:
+        fmap.fit_bounds([[min(lats), min(lons)], [max(lats), max(lons)]])
 
     _add_project_search(fmap, projects)
 
     layers = {}
-    layer_hex_cache = {}
-    marker_records = []
+    utility_index = {}
+    utility_colors = []
     for p in projects:
         layer_name = p.get("sheet") or p.get("source_name") or "Projects"
         if layer_name not in layers:
@@ -1080,12 +1213,14 @@ def build_map(projects):
             popup_lines.append(f"<b>{escape(str(field).strip())}:</b> {escape(display_value)}")
         popup_html += "<br>".join(popup_lines)
 
-        if layer_name == "DESC Geocoded":
-            utility_hex = "#007bff"       # blue
-        elif layer_name == "GA ITS Geocoded":
-            utility_hex = "#fd7e14"       # orange
-        else:
-            utility_hex = "#2b2b2b"       # fallback
+        if layer_name not in utility_index:
+            utility_index[layer_name] = len(utility_colors)
+            utility_colors.append((
+                layer_name,
+                ICON_COLOR_HEX.get(get_source_color(layer_name), "#2b2b2b"),
+                layers[layer_name].get_name(),
+            ))
+        utility_hex = utility_colors[utility_index[layer_name]][1]
 
         marker = folium.CircleMarker(
             location=[p["lat"], p["lon"]],
@@ -1098,28 +1233,20 @@ def build_map(projects):
             tooltip=escape(title),
             popup=folium.Popup(popup_html, max_width=350),
         )
-
         marker.add_to(layers[layer_name])
-
-        marker_records.append(
-            (marker.get_name(), utility_hex)
-        )
-
-        marker.add_to(layers[layer_name])
-        marker_records.append((marker.get_name(), utility_hex))
-
-    _add_color_mode_control(fmap, layer_hex_cache)
 
     try:
-        overlaps = _load_workbook_overlaps()
-    except (OSError, ValueError, KeyError) as error:
-        print(f"Overlap calculation skipped: {error}")
+        overlaps = _load_live_overlaps(projects)
+    except Exception as error:
+        import traceback
+        print(f"[overlaps] calculation failed, showing no overlaps this refresh: {error}")
+        traceback.print_exc()
         overlaps = []
 
-    if overlaps:
-        project_lookup = _build_project_lookup(projects)
-        _add_overlap_lines(fmap, overlaps, project_lookup)
-        _add_overlap_ranking_panel(fmap, overlaps, project_lookup)
+    project_lookup = _build_project_lookup(projects) if overlaps else {}
+    _add_legend(fmap, utility_colors, overlaps, project_lookup)
 
-    folium.LayerControl(collapsed=False).add_to(fmap)
+    if overlaps:
+        _add_overlap_lines(fmap, overlaps, project_lookup)
+
     return fmap.get_root().render()

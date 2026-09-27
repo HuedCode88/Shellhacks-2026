@@ -109,18 +109,94 @@ input {
   box-sizing: content-box;
 }
 
+.topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+}
+
+.imports-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 12px;
+  color: var(--ink);
+  background: var(--mint);
+  border: 1px solid #bfe0cd;
+  border-radius: 5px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.imports-toggle:hover {
+  background: #cbe9d8;
+}
+
+.imports-toggle .import-count {
+  padding: 1px 7px;
+}
+
+/* The upload panel is now a slide-in drawer, closed by default, so the
+   map gets the full workspace width instead of a permanent sidebar. */
 .workspace {
+  position: relative;
   display: grid;
   min-height: 0;
-  grid-template-columns: 326px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 64px 0 0 0;
+  z-index: 39;
+  background: rgba(23, 42, 36, 0.25);
 }
 
 .upload-panel {
-  z-index: 1;
+  position: fixed;
+  top: 64px;
+  left: 0;
+  bottom: 0;
+  z-index: 40;
+  width: 326px;
+  max-width: 88vw;
   overflow-y: auto;
-  padding: 29px 24px 20px;
+  padding: 22px 24px 20px;
   background: var(--paper);
   border-right: 1px solid var(--line);
+  box-shadow: 6px 0 22px rgba(0, 0, 0, 0.18);
+  transform: translateX(-100%);
+  transition: transform 0.22s ease;
+}
+
+.upload-panel.is-open {
+  transform: translateX(0);
+}
+
+.upload-panel-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.drawer-close {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+}
+
+.drawer-close:hover {
+  background: var(--mint);
 }
 
 .eyebrow {
@@ -388,6 +464,15 @@ input {
   border: 1px solid #d2dbd4;
   border-radius: 3px;
 }
+#second-view-container {
+  position: fixed;
+  bottom: 40px;
+  right: 20px;
+  z-index: 9999;
+}
+#second-view {
+  position: relative;
+}
 
 button:focus-visible,
 input:focus-visible,
@@ -415,17 +500,21 @@ a:focus-visible {
     font-size: 9px;
   }
 
-  .workspace {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-rows: minmax(250px, auto) minmax(0, 1fr);
-    overflow-y: auto;
+  .topbar-right {
+    gap: 10px;
+  }
+
+  .imports-toggle-label {
+    display: none;
+  }
+
+  .drawer-backdrop {
+    inset: 58px 0 0 0;
   }
 
   .upload-panel {
-    overflow: visible;
-    padding: 20px 17px 12px;
-    border-right: 0;
-    border-bottom: 1px solid var(--line);
+    top: 58px;
+    width: 92vw;
   }
 
   .intro-copy {
@@ -445,4 +534,5 @@ a:focus-visible {
   .map-toolbar {
     padding: 0 7px 8px;
   }
+
 }

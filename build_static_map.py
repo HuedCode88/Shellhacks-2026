@@ -1592,7 +1592,7 @@ def add_project_search(fmap, projects):
                 onclick="searchProjects()"
                 title="Search"
             >
-                🔍
+                
             </button>
 
         </div>
