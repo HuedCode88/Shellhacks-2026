@@ -48,6 +48,14 @@ def _find_field(record, field_type):
             if "projectname" in name and value is not None and str(value).strip():
                 return value
 
+    if field_type == "category":
+        # Catches columns like "Sponsor (GPC/GTC/MEAG/DU/SAV)" whose
+        # normalized form ("sponsorgpcgtcmeagdusav") won't exact-match the
+        # plain "sponsor" alias above.
+        for name, value in normalized:
+            if "sponsor" in name and value is not None and str(value).strip():
+                return value
+
     return None
 
 def _source_color(source_name):

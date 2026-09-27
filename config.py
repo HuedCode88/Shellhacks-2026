@@ -11,10 +11,17 @@ UPLOADS_FILE = os.path.join(APP_DIR, "uploaded_projects.json")
 DATABASE_FILE = os.path.join(APP_DIR, "projects.sqlite3")
 
 MAX_UPLOAD_BYTES = 15 * 1024 * 1024
-MAX_DOCUMENT_CHARS = 120_000
+MAX_DOCUMENT_CHARS = 120_000  # size of ONE chunk sent to Gemini, not a hard
+# document-size ceiling anymore -- see MAX_CHUNKS_PER_UPLOAD below.
+MAX_CHUNKS_PER_UPLOAD = 20  # bounds total Gemini calls (and cost) for one
+# upload: applies to PDF page-chunks and, now, chunks of any other long
+# document too, instead of silently truncating anything past the first
+# MAX_DOCUMENT_CHARS characters.
 MAX_ARCHIVE_UNCOMPRESSED_BYTES = 25 * 1024 * 1024
 MAX_PROJECTS_PER_UPLOAD = 100
-MAX_GEOCODES_PER_UPLOAD = 10
+GEOCODES_PER_PROJECT_BUDGET = 3  # whole-location + up to 2 endpoint-level Nominatim calls
+MAX_GEOCODES_HARD_CAP = 300  # absolute ceiling regardless of document size;
+# at 1 request/sec this bounds worst-case geocoding time to ~5 minutes
 PDF_PAGES_PER_REQUEST = 4
 PDF_PAGE_OVERLAP = 1
 
@@ -51,10 +58,20 @@ PROJECT_RESPONSE_SCHEMA = {
 
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".txt", ".md", ".csv"}
 
-ICON_COLORS = (
-    "blue", "cadetblue", "darkgreen", "darkpurple", "green", "orange",
-    "purple", "red", "darkred",
+# Bounding boxes (south,west,north,east) searched for live Overpass-based
+# geocoding of uploaded projects -- South Carolina, then Georgia. Add more
+# entries here if you need to cover additional states.
+OVERPASS_BBOXES = (
+    "32.0,-83.5,35.3,-78.5",   # South Carolina
+    "30.3,-85.7,35.1,-80.7",   # Georgia
 )
+OVERPASS_CACHE_MAX_AGE_DAYS = 7
+
+ICON_COLORS = (
+    "blue", "cadetblue", "darkblue", "darkgreen", "darkpurple", "darkred",
+    "green", "lightblue", "lightgreen", "lightred", "orange", "pink",
+    "purple", "red", "beige", "gray", "black",
+)  # "white" deliberately excluded -- poor contrast against the map canvas
 
 FIELD_ALIASES = {
     "latitude": ("centerlatitude", "centerlat", "latitude", "lat", "y"),

@@ -53,11 +53,17 @@ class ProjectMapHandler(BaseHTTPRequestHandler):
             raise ValueError("The upload form was not formatted correctly.")
 
         uploads = []
+        utility_name = ""
         for part in message.iter_parts():
-            if (
-                part.get_content_disposition() != "form-data"
-                or part.get_param("name", header="content-disposition") != "document"
-            ):
+            if part.get_content_disposition() != "form-data":
+                continue
+            field_name = part.get_param("name", header="content-disposition")
+
+            if field_name == "utility_name":
+                utility_name = (part.get_content() or "").strip()
+                continue
+
+            if field_name != "document":
                 continue
 
             filename = part.get_filename()
@@ -74,7 +80,7 @@ class ProjectMapHandler(BaseHTTPRequestHandler):
         if len(content) > MAX_UPLOAD_BYTES:
             raise OverflowError("The document exceeds the 15 MB upload limit.")
 
-        return filename, content
+        return filename, content, utility_name
 
     def do_GET(self):
         path = urlsplit(self.path).path
@@ -168,10 +174,10 @@ class ProjectMapHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            filename, content = self._parse_document_upload(body)
+            filename, content, utility_name = self._parse_document_upload(body)
             extracted = extract_projects_with_gemini(filename, content)
             projects, skipped, geocode_count = normalize_uploaded_projects(
-                extracted, filename
+                extracted, filename, utility_name
             )
         except OverflowError as error:
             self._send_json(413, {"error": str(error)})
@@ -208,6 +214,9 @@ class ProjectMapHandler(BaseHTTPRequestHandler):
         self._send_json(200, {
             "added": added,
             "uploaded_count": total,
+            "extracted": len(extracted),
+            "not_mappable": skipped,
+            "already_imported": len(projects) - added,
             "skipped": skipped + len(projects) - added,
             "geocoded": geocode_count,
         })

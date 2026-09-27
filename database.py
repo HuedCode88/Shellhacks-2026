@@ -13,8 +13,8 @@ from sqlalchemy.dialects.postgresql import insert as postgres_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.engine import URL, Engine
 
-from config import DATABASE_FILE, UPLOADS_FILE, EXCEL_FILE
-from utils import safe_float, _row_dict, _find_field, _source_color, _clean_text
+from config import DATABASE_FILE, UPLOADS_FILE, EXCEL_FILE, ICON_COLORS
+from utils import safe_float, _row_dict, _find_field, _clean_text
 
 DATABASE_LOCK = Lock()
 ENGINE_LOCK = Lock()
@@ -45,6 +45,12 @@ APP_METADATA_TABLE = Table(
     DATABASE_METADATA,
     Column("key", String, primary_key=True),
     Column("value", String, nullable=False),
+)
+SOURCE_COLORS_TABLE = Table(
+    "source_colors",
+    DATABASE_METADATA,
+    Column("source_name", String, primary_key=True),
+    Column("color", String, nullable=False),
 )
 
 def _database_engine() -> Engine:
@@ -88,6 +94,59 @@ def _database_engine() -> Engine:
 def database_backend():
     return "Tiger Cloud PostgreSQL" if os.environ.get("DATABASE_URL", "").strip() else "Local SQLite"
 
+def _get_or_assign_color(connection, source_name):
+    """Core logic, operating on an ALREADY-OPEN connection with no
+    locking of its own -- for callers (like _insert_database_project)
+    that already hold DATABASE_LOCK and a transaction. Calling
+    get_source_color() (below) from inside one of those would deadlock,
+    since threading.Lock isn't reentrant."""
+    existing = connection.execute(
+        select(SOURCE_COLORS_TABLE.c.color).where(
+            SOURCE_COLORS_TABLE.c.source_name == source_name
+        )
+    ).scalar_one_or_none()
+    if existing:
+        return existing
+
+    assigned_count = connection.execute(
+        select(func.count()).select_from(SOURCE_COLORS_TABLE)
+    ).scalar_one()
+    color = ICON_COLORS[assigned_count % len(ICON_COLORS)]
+
+    insert_function = (
+        postgres_insert
+        if connection.dialect.name == "postgresql"
+        else sqlite_insert
+    )
+    statement = insert_function(SOURCE_COLORS_TABLE).values(
+        source_name=source_name, color=color
+    ).on_conflict_do_nothing(index_elements=[SOURCE_COLORS_TABLE.c.source_name])
+    connection.execute(statement)
+
+    # If a concurrent call already inserted this source_name between our
+    # SELECT and our INSERT, on_conflict_do_nothing means our row didn't
+    # land -- re-read to get whichever color actually won.
+    return connection.execute(
+        select(SOURCE_COLORS_TABLE.c.color).where(
+            SOURCE_COLORS_TABLE.c.source_name == source_name
+        )
+    ).scalar_one()
+
+def get_source_color(source_name):
+    """Returns a stable marker color for `source_name` (a sheet name or
+    uploaded utility name), assigning one from ICON_COLORS the first time
+    this name is seen and remembering it permanently. Colors are handed
+    out in first-seen order rather than hashed, so two different names
+    can't collide until more distinct sources exist than there are colors
+    -- a hash-based assignment can (and did) collide with far fewer.
+
+    For callers OUTSIDE an existing DATABASE_LOCK'd transaction only --
+    see _get_or_assign_color() above for use from inside one."""
+    initialize_database()
+    with DATABASE_LOCK:
+        with _database_engine().begin() as connection:
+            return _get_or_assign_color(connection, source_name)
+
 def _database_connection():
     return _database_engine().connect()
 
@@ -122,7 +181,7 @@ def _insert_database_project(connection, project):
         "longitude": float(project["lon"]),
         "category": _clean_text(project.get("category"), 120),
         "fields_json": json.loads(json.dumps(fields, ensure_ascii=False, default=str)),
-        "marker_color": project.get("color") or _source_color(source_name),
+        "marker_color": project.get("color") or _get_or_assign_color(connection, source_name),
     }
     insert_function = (
         postgres_insert
@@ -237,6 +296,8 @@ def load_workbook_projects(path):
             if not header:
                 continue
 
+            sheet_color = get_source_color(worksheet.title)
+
             for row_number, row in enumerate(rows, start=2):
                 record = _row_dict(header, row)
                 latitude = safe_float(_find_field(record, "latitude"))
@@ -264,7 +325,7 @@ def load_workbook_projects(path):
                     "lat": latitude,
                     "lon": longitude,
                     "fields": record,
-                    "color": _source_color(worksheet.title),
+                    "color": sheet_color,
                 })
     finally:
         workbook.close()

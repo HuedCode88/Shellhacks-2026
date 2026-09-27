@@ -1,6 +1,7 @@
 const uploadForm = document.querySelector("#upload-form");
 const uploadButton = document.querySelector("#upload-button");
 const fileInput = document.querySelector("#document-file");
+const utilityNameInput = document.querySelector("#utility-name");
 const uploadStatus = document.querySelector("#upload-status");
 const uploadCount = document.querySelector("#upload-count");
 const totalCount = document.querySelector("#total-count");
@@ -53,8 +54,15 @@ uploadForm.addEventListener("submit", async (event) => {
     return;
   }
 
+  const utilityName = utilityNameInput.value.trim();
+  if (!utilityName) {
+    setUploadStatus("Enter the utility name first.", true);
+    return;
+  }
+
   const formData = new FormData();
   formData.set("document", fileInput.files[0]);
+  formData.set("utility_name", utilityName);
   uploadButton.disabled = true;
   uploadButton.textContent = "Sending to Gemini...";
   setUploadStatus("Reading the document and mapping its projects.");
@@ -64,10 +72,13 @@ uploadForm.addEventListener("submit", async (event) => {
       method: "POST",
       body: formData,
     });
-    const summary = [`Added ${result.added} ${result.added === 1 ? "project" : "projects"}.`];
+    const summary = [`Added ${result.added} ${result.added === 1 ? "project" : "projects"} (of ${result.extracted} extracted).`];
 
-    if (result.skipped) {
-      summary.push(`${result.skipped} could not be mapped or were already imported.`);
+    if (result.already_imported) {
+      summary.push(`${result.already_imported} already imported.`);
+    }
+    if (result.not_mappable) {
+      summary.push(`${result.not_mappable} could not be geocoded -- check the server console for why.`);
     }
     if (result.geocoded) {
       summary.push(`${result.geocoded} location lookups used OpenStreetMap.`);
