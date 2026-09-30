@@ -76,6 +76,8 @@ MONGO_BUCKET_NAME = "images"
 MONGO_CLIENT = MongoClient(
     os.getenv("MONGODB_URI"),
     maxPoolSize=MONGO_TILE_WORKERS + 4,
+    connectTimeoutMS=2000,
+    serverSelectionTimeoutMS=2000,
 )
 
 MONGO_DB = MONGO_CLIENT[MONGO_DB_NAME]
@@ -86,11 +88,16 @@ TILE_FS = gridfs.GridFS(
 )
 
 # GridFS doesn't index metadata fields by default, so without this,
-# every tile lookup below collection-scans images.files. create_index
-# is a cheap no-op if the index already exists.
-MONGO_DB[f"{MONGO_BUCKET_NAME}.files"].create_index(
-    [("metadata.z", 1), ("metadata.x", 1), ("metadata.y", 1)]
-)
+# every tile lookup below collection-scans images.files. A missing MongoDB
+# server must not prevent the local tile fallback from starting.
+MONGO_AVAILABLE = True
+try:
+    MONGO_DB[f"{MONGO_BUCKET_NAME}.files"].create_index(
+        [("metadata.z", 1), ("metadata.x", 1), ("metadata.y", 1)]
+    )
+except Exception as error:
+    MONGO_AVAILABLE = False
+    print(f"MongoDB unavailable; using local/OSM tile fallback: {error}")
 
 
 # ============================================================
@@ -355,6 +362,11 @@ def upload_tile_to_mongo(zoom, tile_x, tile_y, image_bytes):
     so this exact tile never needs OSM again -- everything ends up
     living in MongoDB over time, with no physical map_tiles folder.
     """
+    global MONGO_AVAILABLE
+
+    if not MONGO_AVAILABLE:
+        return
+
     try:
         existing = MONGO_DB[f"{MONGO_BUCKET_NAME}.files"].find_one(
             {"metadata.z": zoom, "metadata.x": tile_x, "metadata.y": tile_y},
@@ -374,6 +386,7 @@ def upload_tile_to_mongo(zoom, tile_x, tile_y, image_bytes):
             },
         )
     except Exception as error:
+        MONGO_AVAILABLE = False
         print(f"Could not save tile z={zoom} x={tile_x} y={tile_y} to MongoDB: {error}")
 
 
@@ -385,6 +398,8 @@ def fetch_tiles_with_fallback(zoom, min_x, max_x, min_y, max_y):
     falls back to a direct OSM download, and that result is written
     back into MongoDB so the gap doesn't need filling again.
     """
+
+    global MONGO_AVAILABLE
 
     needed = [
         (tile_x, tile_y)
@@ -400,20 +415,22 @@ def fetch_tiles_with_fallback(zoom, min_x, max_x, min_y, max_y):
     if not uncached:
         return
 
-    try:
-        metadata_cursor = TILE_FS.find({
-            "metadata.z": zoom,
-            "metadata.x": {"$gte": min_x, "$lte": max_x},
-            "metadata.y": {"$gte": min_y, "$lte": max_y},
-        })
+    grid_out_by_coordinate = {}
+    if MONGO_AVAILABLE:
+        try:
+            metadata_cursor = TILE_FS.find({
+                "metadata.z": zoom,
+                "metadata.x": {"$gte": min_x, "$lte": max_x},
+                "metadata.y": {"$gte": min_y, "$lte": max_y},
+            })
 
-        grid_out_by_coordinate = {
-            (grid_out.metadata["x"], grid_out.metadata["y"]): grid_out
-            for grid_out in metadata_cursor
-        }
-    except Exception as error:
-        print(f"MongoDB tile lookup failed; using local/OSM fallback: {error}")
-        grid_out_by_coordinate = {}
+            grid_out_by_coordinate = {
+                (grid_out.metadata["x"], grid_out.metadata["y"]): grid_out
+                for grid_out in metadata_cursor
+            }
+        except Exception as error:
+            MONGO_AVAILABLE = False
+            print(f"MongoDB tile lookup failed; using local/OSM fallback: {error}")
 
     def read_tile(coordinates):
         tile_x, tile_y = coordinates

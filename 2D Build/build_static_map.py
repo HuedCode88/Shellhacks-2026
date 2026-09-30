@@ -328,7 +328,8 @@ def add_overlap_lines(
 
     overlap_layer = folium.FeatureGroup(
         name="Project Overlaps",
-        show=True
+        show=False,
+        control=False,
     )
 
     overlap_count = 0
@@ -788,6 +789,7 @@ def add_overlap_ranking_panel(
 
     <div id="overlap-container"
         style="
+            display: none;
             position: fixed;
 
             bottom: 20px;
